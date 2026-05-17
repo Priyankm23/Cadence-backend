@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: meeting-intel-redis
+    ports:
+      - "6379:6379"
+
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: api-gateway
+    ports:
+      - "8000:8000"
+    env_file: ./services/api-gateway/.env
+    depends_on:
+      - redis
+
+  auth-service:
+    build: ./services/auth-service
+    container_name: auth-service
+    env_file: ./services/auth-service/.env
+    depends_on:
+      - redis
+
+  meeting-service:
+    build: ./services/meeting-service
+    container_name: meeting-service
+    env_file: ./services/meeting-service/.env
+    ports:
+      - "8002:8002"
+    depends_on:
+      - redis
+
+  transcript-worker:
+    build: ./services/transcript-service
+    container_name: transcript-worker
+    env_file: ./services/transcript-service/.env
+    depends_on:
+      - redis
+
+  ai-worker:
+    build: ./services/ai-service
+    container_name: ai-worker
+    env_file: ./services/ai-service/.env
+    depends_on:
+      - redis
+
+# notification-worker is disabled as credentials are not provided
+# notification-worker:
+#   build: ./services/notification-service
+#   container_name: notification-worker
+#   command: celery -A worker worker --loglevel=info
+#   env_file: ./services/notification-service/.env
+#   depends_on:
+#     - redis

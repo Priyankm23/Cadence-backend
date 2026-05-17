@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+python-dotenv
+python-socketio
+alembic
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+redis
+livekit-api
