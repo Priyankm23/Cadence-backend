@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr, UUID4
 from datetime import datetime
 
@@ -21,6 +21,17 @@ class UserOut(UserBase):
 
     class Config:
         from_attributes = True
+
+class UserPublic(BaseModel):
+    id: UUID4
+    name: str
+    email: EmailStr
+
+    class Config:
+        from_attributes = True
+
+class UserIdsRequest(BaseModel):
+    user_ids: List[UUID4]
 
 class Token(BaseModel):
     access_token: str

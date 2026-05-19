@@ -11,3 +11,4 @@ python-jose[cryptography]
 passlib[bcrypt]
 redis
 livekit-api
+httpx

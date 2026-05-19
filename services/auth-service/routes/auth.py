@@ -97,3 +97,11 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 @router.get("/me", response_model=schemas.UserOut)
 def get_me(current_user: models.User = Depends(get_current_user)):
     return current_user
+
+@router.get("/users/{user_id}", response_model=schemas.UserPublic)
+def get_user_by_id(user_id: str, db: Session = Depends(get_db)):
+    return AuthService.get_user_by_id(db, user_id)
+
+@router.post("/users/batch", response_model=list[schemas.UserPublic])
+def get_users_by_ids(payload: schemas.UserIdsRequest, db: Session = Depends(get_db)):
+    return AuthService.get_users_by_ids(db, [str(user_id) for user_id in payload.user_ids])

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
-from typing import List, AnyStr
+from typing import List, AnyStr, Dict, Tuple
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
+import httpx
 
 from core.database import get_db
 from core.config import settings
@@ -11,6 +12,20 @@ from core.security import decode_token
 import models, schemas
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
+
+def fetch_users_by_ids(user_ids: list[str]) -> Dict[str, dict]:
+    if not user_ids:
+        return {}
+
+    try:
+        auth_url = f"{settings.AUTH_SERVICE_URL}/auth/users/batch"
+        response = httpx.post(auth_url, json={"user_ids": user_ids}, timeout=10)
+        response.raise_for_status()
+        users = response.json()
+    except Exception:
+        users = []
+
+    return {str(u["id"]): u for u in users}
 
 def get_current_user_id(authorization: str = Header(...)) -> UUID:
     try:
@@ -27,13 +42,12 @@ def get_current_user_name(authorization: str = Header(...)) -> AnyStr:
     try:
         token = authorization.split(" ")[1]
         payload = decode_token(token)
-        data = payload.get("data")
-        user_name = data.name
-        if user_name is None:
+        user_name = payload.get("name") or payload.get("data", {}).get("name")
+        if not user_name:
             raise HTTPException(status_code=403, detail="Invalid Token - user_name missing from the token")
         return user_name
     except Exception:
-            raise HTTPException(status_code=401, detail="Invalid or missing or modified Token")
+        raise HTTPException(status_code=401, detail="Invalid or missing or modified Token")
 
 @router.post("/", response_model=schemas.Meeting)
 def create_meeting(
@@ -50,6 +64,8 @@ def create_meeting(
     db.add(meeting)
     db.commit()
     db.refresh(meeting)
+
+    meeting.creator_name = user_name
     
     host_name = user_name if user_name else "Host"
     
@@ -71,12 +87,20 @@ def list_meetings(
     user_id: UUID = Depends(get_current_user_id)
 ):
     # Join with MeetingParticipant to get all meetings the user is part of
-    return db.query(models.Meeting).join(
+    meetings = db.query(models.Meeting).join(
         models.MeetingParticipant,
         models.Meeting.id == models.MeetingParticipant.meeting_id
     ).filter(
         models.MeetingParticipant.user_id == user_id
     ).order_by(models.Meeting.created_at.desc()).all()
+
+    creator_ids = list({str(m.creator_id) for m in meetings})
+    creator_lookup = fetch_users_by_ids(creator_ids)
+    for meeting in meetings:
+        creator_data = creator_lookup.get(str(meeting.creator_id))
+        meeting.creator_name = creator_data.get("name") if creator_data else None
+
+    return meetings
 
 @router.get("/{meeting_id}", response_model=schemas.Meeting)
 def get_meeting(
@@ -87,11 +111,15 @@ def get_meeting(
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    creator_lookup = fetch_users_by_ids([str(meeting.creator_id)])
+    creator_data = creator_lookup.get(str(meeting.creator_id))
+    meeting.creator_name = creator_data.get("name") if creator_data else None
     return meeting
 
 @router.post("/{meeting_id}/end", response_model=schemas.Meeting)
 async def end_meeting(
     meeting_id: UUID,
+    payload: schemas.MeetingEndRequest,
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
@@ -103,7 +131,13 @@ async def end_meeting(
         raise HTTPException(status_code=404, detail="Meeting not found or unauthorized")
     
     meeting.status = "ended"
-    meeting.ended_at = datetime.utcnow()
+    meeting.ended_at = datetime.now(timezone.utc)
+    if payload.duration_seconds is not None:
+        meeting.duration_seconds = int(payload.duration_seconds)
+    elif meeting.created_at:
+        meeting.duration_seconds = int((meeting.ended_at - meeting.created_at).total_seconds())
+    else:
+        meeting.duration_seconds = None
     db.commit()
     db.refresh(meeting)
     
@@ -131,6 +165,67 @@ def get_transcripts(
     for s in segments:
         s.meeting_title = meeting.title
     return segments
+
+@router.get("/{meeting_id}/transcripts/with-stats", response_model=schemas.MeetingTranscriptsWithStats)
+def get_transcripts_with_stats(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    segments = db.query(models.TranscriptSegment).filter(
+        models.TranscriptSegment.meeting_id == meeting_id
+    ).order_by(models.TranscriptSegment.created_at.asc()).all()
+
+    for s in segments:
+        s.meeting_title = meeting.title
+
+    total_meeting_seconds = 0
+    if meeting.duration_seconds is not None:
+        total_meeting_seconds = int(meeting.duration_seconds)
+    elif meeting.started_at and meeting.ended_at:
+        total_meeting_seconds = int((meeting.ended_at - meeting.started_at).total_seconds())
+
+    per_user: Dict[str, int] = {}
+    for segment in segments:
+        if segment.start_time is None or segment.end_time is None:
+            continue
+        duration_ms = max(0, segment.end_time - segment.start_time)
+        per_user[str(segment.user_id)] = per_user.get(str(segment.user_id), 0) + int(duration_ms / 1000)
+
+    participant_rows = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id
+    ).all()
+    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participant_rows])
+
+    participants: list[schemas.ParticipantSpeakingStat] = []
+    for participant in participant_rows:
+        user_id_str = str(participant.user_id)
+        speaking_seconds = per_user.get(user_id_str, 0)
+        speaking_percentage = 0.0
+        if total_meeting_seconds > 0:
+            speaking_percentage = round((speaking_seconds / total_meeting_seconds) * 100, 2)
+
+        user_data = user_lookup.get(user_id_str)
+        participants.append(
+            schemas.ParticipantSpeakingStat(
+                user_id=participant.user_id,
+                user_name=user_data.get("name") if user_data else None,
+                email=user_data.get("email") if user_data else None,
+                speaking_time_seconds=speaking_seconds,
+                speaking_percentage=speaking_percentage
+            )
+        )
+
+    return schemas.MeetingTranscriptsWithStats(
+        meeting_id=meeting.id,
+        meeting_title=meeting.title,
+        total_meeting_seconds=total_meeting_seconds,
+        participants=participants,
+        transcripts=segments
+    )
 
 @router.get("/{meeting_id}/transcripts/user/{user_id}", response_model=List[schemas.TranscriptSegment])
 def get_user_transcripts(
@@ -272,10 +367,47 @@ def list_participants(
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     
-    return db.query(models.MeetingParticipant).filter(
+    participants = db.query(models.MeetingParticipant).filter(
         models.MeetingParticipant.meeting_id == meeting_id,
         models.MeetingParticipant.left_at.is_(None)
     ).all()
+
+    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participants])
+    for participant in participants:
+        user_data = user_lookup.get(str(participant.user_id))
+        if user_data:
+            participant.user_name = user_data.get("name")
+            participant.email = user_data.get("email")
+        else:
+            participant.user_name = None
+            participant.email = None
+
+    return participants
+
+@router.get("/{meeting_id}/participants/all", response_model=List[schemas.MeetingParticipant])
+def list_all_participants(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    participants = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id
+    ).all()
+
+    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participants])
+    for participant in participants:
+        user_data = user_lookup.get(str(participant.user_id))
+        if user_data:
+            participant.user_name = user_data.get("name")
+            participant.email = user_data.get("email")
+        else:
+            participant.user_name = None
+            participant.email = None
+
+    return participants
 
 @router.post("/{meeting_id}/join", response_model=schemas.MeetingParticipant)
 def join_meeting(
@@ -290,6 +422,11 @@ def join_meeting(
         
     if meeting.status != "active":
         raise HTTPException(status_code=400, detail="Cannot join an inactive meeting")
+
+    if meeting.started_at is None and meeting.creator_id == user_id:
+        meeting.started_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(meeting)
         
     # Check if already joined
     participant = db.query(models.MeetingParticipant).filter(
@@ -310,6 +447,26 @@ def join_meeting(
     db.commit()
     db.refresh(new_participant)
     return new_participant
+
+@router.post("/{meeting_id}/leave", response_model=schemas.MeetingParticipant)
+def leave_meeting(
+    meeting_id: UUID,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    participant = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.user_id == user_id,
+        models.MeetingParticipant.left_at.is_(None)
+    ).first()
+
+    if not participant:
+        raise HTTPException(status_code=404, detail="Active participant not found")
+
+    participant.left_at = datetime.utcnow()
+    db.commit()
+    db.refresh(participant)
+    return participant
 
 @router.post("/{meeting_id}/livekit-token")
 def create_livekit_token(

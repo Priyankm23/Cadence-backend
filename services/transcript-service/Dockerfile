@@ -6,6 +6,9 @@ WORKDIR /app
 # Currently, worker.py uses pure python (wave/io) for audio.
 # No extra system packages required.
 
+# Install CPU-only version of PyTorch to avoid massive NVIDIA/CUDA downloads
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -118,3 +118,9 @@ class AuthService:
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         return user
+
+    @staticmethod
+    def get_users_by_ids(db: Session, user_ids: list[str]):
+        if not user_ids:
+            return []
+        return db.query(models.User).filter(models.User.id.in_(user_ids)).all()

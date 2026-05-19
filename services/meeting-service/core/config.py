@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     LIVEKIT_API_KEY: str = os.getenv("LIVEKIT_API_KEY", "")
     LIVEKIT_API_SECRET: str = os.getenv("LIVEKIT_API_SECRET", "")
     LIVEKIT_URL: str = os.getenv("LIVEKIT_URL", "")
+    AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8001")
 
     class Config:
         case_sensitive = True

@@ -125,6 +125,8 @@ async def handle_audio_chunk(sid, data):
 
     meeting_id = data.get("meeting_id")
     audio_bytes = data.get("audio")
+    chunk_start_ms = data.get("chunk_start_ms")
+    chunk_end_ms = data.get("chunk_end_ms")
 
     if meeting_id and audio_bytes and user_id:
         payload = {
@@ -132,6 +134,8 @@ async def handle_audio_chunk(sid, data):
             "user_id": user_id,
             "user_name": user_name,
             "timestamp": time.time(),
+            "chunk_start_ms": chunk_start_ms,
+            "chunk_end_ms": chunk_end_ms,
             "audio": base64.b64encode(audio_bytes).decode('utf-8')
         }
         await redis_client.rpush("audio_queue", json.dumps(payload))

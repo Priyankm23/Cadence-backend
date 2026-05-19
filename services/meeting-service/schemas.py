@@ -12,8 +12,10 @@ class MeetingCreate(MeetingBase):
 class Meeting(MeetingBase):
     id: UUID
     creator_id: UUID
+    creator_name: Optional[str] = None
     status: Optional[str] = "active"
     created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     source: Optional[str] = "internal"
     audio_url: Optional[str] = None
@@ -47,10 +49,27 @@ class UserAggregatedTranscripts(BaseModel):
     total_speaking_time_seconds: int = 0
     meetings: list[UserMeetingTranscript]
 
+class ParticipantSpeakingStat(BaseModel):
+    user_id: UUID
+    user_name: Optional[str] = None
+    email: Optional[str] = None
+    speaking_time_seconds: int = 0
+    speaking_percentage: float = 0.0
+
+class MeetingTranscriptsWithStats(BaseModel):
+    meeting_id: UUID
+    meeting_title: Optional[str] = None
+    total_meeting_seconds: int = 0
+    participants: list[ParticipantSpeakingStat]
+    transcripts: list[TranscriptSegment]
+
 class MeetingAnalysisCreate(BaseModel):
     summary: str
     action_items: str
     sentiment: str
+
+class MeetingEndRequest(BaseModel):
+    duration_seconds: Optional[int] = None
 
 class MeetingAnalysis(MeetingAnalysisCreate):
     id: UUID
@@ -66,6 +85,8 @@ class MeetingParticipant(MeetingParticipantCreate):
     id: UUID
     meeting_id: UUID
     user_id: UUID
+    user_name: Optional[str] = None
+    email: Optional[str] = None
     role: Optional[str] = "attendee"
     joined_at: Optional[datetime] = None
     left_at: Optional[datetime] = None
