@@ -14,8 +14,19 @@ class Settings(BaseSettings):
     AI_SERVICE_URL: str = os.getenv("AI_SERVICE_URL", "http://ai-service:8004")
     
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    
+    # CORS Configuration
+    ALLOWED_ORIGINS_STR: str = os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173"
+    )
+
+    @property
+    def ALLOWED_ORIGINS(self) -> list[str]:
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS_STR.split(",") if origin.strip()]
 
     class Config:
         case_sensitive = True
 
 settings = Settings()
+
