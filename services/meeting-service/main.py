@@ -39,21 +39,29 @@ def decode_token(token: str) -> dict:
         raise ValueError("Invalid token")
 
 async def redis_listener():
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe("transcript_updates")
-    print("Subscribed to transcript_updates Redis channel")
-    async for message in pubsub.listen():
-        if message["type"] == "message":
-            try:
-                data_bytes = message["data"]
-                data_str = data_bytes.decode('utf-8') if isinstance(data_bytes, bytes) else data_bytes
-                data = json.loads(data_str)
-                meeting_id = data.get("meeting_id")
-                if meeting_id:
-                    # Emit to socket.io room
-                    await sio.emit("transcript_update", data, room=str(meeting_id))
-            except Exception as e:
-                print(f"Error handling pubsub message: {e}")
+    while True:
+        try:
+            pubsub = redis_client.pubsub()
+            await pubsub.subscribe("transcript_updates")
+            print("Subscribed to transcript_updates Redis channel")
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        data_bytes = message["data"]
+                        data_str = data_bytes.decode('utf-8') if isinstance(data_bytes, bytes) else data_bytes
+                        data = json.loads(data_str)
+                        meeting_id = data.get("meeting_id")
+                        if meeting_id:
+                            # Emit to socket.io room
+                            await sio.emit("transcript_update", data, room=str(meeting_id))
+                    except Exception as e:
+                        print(f"Error handling pubsub message: {e}")
+        except redis.exceptions.ConnectionError as e:
+            print(f"Redis pub/sub connection lost: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Unexpected error in redis_listener: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup_event():
