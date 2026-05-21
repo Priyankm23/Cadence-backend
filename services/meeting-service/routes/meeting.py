@@ -59,7 +59,8 @@ def create_meeting(
     meeting = models.Meeting(
         title=meeting_in.title,
         creator_id=user_id,
-        status="active"
+        status="active",
+        mode=meeting_in.mode
     )
     db.add(meeting)
     db.commit()
@@ -101,6 +102,57 @@ def list_meetings(
         meeting.creator_name = creator_data.get("name") if creator_data else None
 
     return meetings
+
+@router.get("/action-items/last-completed", response_model=list[schemas.MeetingActionItems])
+def get_action_items_last_completed(
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    # Get distinct meeting IDs the user is part of
+    participant_meeting_ids = db.query(models.MeetingParticipant.meeting_id).filter(
+        models.MeetingParticipant.user_id == user_id
+    ).distinct().subquery()
+
+    # Get last 5 completed meetings where the user is a participant
+    meetings = db.query(models.Meeting).filter(
+        models.Meeting.id.in_(participant_meeting_ids),
+        models.Meeting.status == "ended"
+    ).order_by(
+        models.Meeting.ended_at.desc(),
+        models.Meeting.created_at.desc()
+    ).limit(5).all()
+
+    result = []
+    for meeting in meetings:
+        if meeting.mode == "interview" and meeting.creator_id != user_id:
+            action_items = []
+        else:
+            action_items = db.query(models.ActionItem).filter(
+                models.ActionItem.meeting_id == meeting.id
+            ).all()
+            
+        result.append(
+            schemas.MeetingActionItems(
+                meeting_id=meeting.id,
+                meeting_title=meeting.title,
+                ended_at=meeting.ended_at,
+                action_items=action_items
+            )
+        )
+    return result
+
+@router.get("/{meeting_id}/internal", response_model=schemas.Meeting)
+def get_meeting_internal(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Auth-free endpoint for internal service-to-service calls (ai-service, transcript-service).
+    NOT intended to be exposed through the API gateway to external clients.
+    """
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return meeting
 
 @router.get("/{meeting_id}", response_model=schemas.Meeting)
 def get_meeting(
@@ -188,32 +240,53 @@ def get_transcripts_with_stats(
     elif meeting.started_at and meeting.ended_at:
         total_meeting_seconds = int((meeting.ended_at - meeting.started_at).total_seconds())
 
+    # Aggregate speaking time by user_id (stringified)
     per_user: Dict[str, int] = {}
     for segment in segments:
         if segment.start_time is None or segment.end_time is None:
             continue
         duration_ms = max(0, segment.end_time - segment.start_time)
-        per_user[str(segment.user_id)] = per_user.get(str(segment.user_id), 0) + int(duration_ms / 1000)
+        u_id = str(segment.user_id)
+        per_user[u_id] = per_user.get(u_id, 0) + int(duration_ms / 1000)
 
+    # Fetch unique participants for this meeting
     participant_rows = db.query(models.MeetingParticipant).filter(
         models.MeetingParticipant.meeting_id == meeting_id
     ).all()
-    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participant_rows])
+    
+    # Use a set of unique user IDs to avoid duplicates in the response
+    # We take all user IDs that either are participants or have spoken (transcripts)
+    all_user_ids = {str(p.user_id) for p in participant_rows}
+    all_user_ids.update(per_user.keys())
 
-    participants: list[schemas.ParticipantSpeakingStat] = []
-    for participant in participant_rows:
-        user_id_str = str(participant.user_id)
+    # Fetch user details (name, email) from auth service
+    user_lookup = fetch_users_by_ids(list(all_user_ids))
+
+    participants_stats: list[schemas.ParticipantSpeakingStat] = []
+    for user_id_str in all_user_ids:
         speaking_seconds = per_user.get(user_id_str, 0)
         speaking_percentage = 0.0
         if total_meeting_seconds > 0:
             speaking_percentage = round((speaking_seconds / total_meeting_seconds) * 100, 2)
 
         user_data = user_lookup.get(user_id_str)
-        participants.append(
+        # If user data is missing from auth service, we try to use display_name from meeting_participants
+        display_name = None
+        user_email = None
+        if user_data:
+            display_name = user_data.get("name")
+            user_email = user_data.get("email")
+        else:
+            # Fallback to the first participant record we find for this user
+            p_record = next((pr for pr in participant_rows if str(pr.user_id) == user_id_str), None)
+            if p_record:
+                display_name = p_record.display_name
+
+        participants_stats.append(
             schemas.ParticipantSpeakingStat(
-                user_id=participant.user_id,
-                user_name=user_data.get("name") if user_data else None,
-                email=user_data.get("email") if user_data else None,
+                user_id=UUID(user_id_str),
+                user_name=display_name,
+                email=user_email,
                 speaking_time_seconds=speaking_seconds,
                 speaking_percentage=speaking_percentage
             )
@@ -223,7 +296,7 @@ def get_transcripts_with_stats(
         meeting_id=meeting.id,
         meeting_title=meeting.title,
         total_meeting_seconds=total_meeting_seconds,
-        participants=participants,
+        participants=participants_stats,
         transcripts=segments
     )
 
@@ -246,6 +319,90 @@ def get_user_transcripts(
         s.meeting_title = meeting.title
     return segments
 
+@router.get("/{meeting_id}/transcripts/user/me/analysis", response_model=schemas.UserTranscriptAnalysis)
+def get_my_transcript_analysis(
+    meeting_id: UUID,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    analysis = db.query(models.UserTranscriptAnalysis).filter(
+        models.UserTranscriptAnalysis.meeting_id == meeting_id,
+        models.UserTranscriptAnalysis.user_id == user_id
+    ).first()
+    
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return analysis
+
+@router.post("/{meeting_id}/transcripts/user/me/analysis/trigger")
+async def trigger_personal_analysis(
+    meeting_id: UUID,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+        
+    is_participant = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.user_id == user_id
+    ).first()
+    if not is_participant:
+        raise HTTPException(status_code=403, detail="You are not a participant of this meeting")
+
+    # Serve existing if available
+    existing = db.query(models.UserTranscriptAnalysis).filter(
+        models.UserTranscriptAnalysis.meeting_id == meeting_id,
+        models.UserTranscriptAnalysis.user_id == user_id
+    ).first()
+    if existing:
+        return existing
+
+    from main import redis_client
+    import json
+    await redis_client.rpush("personal_analysis_queue", json.dumps({
+        "meeting_id": str(meeting_id),
+        "user_id": str(user_id)
+    }))
+
+    return {
+        "status": "triggered",
+        "message": "Personal AI analysis has been queued. Check back shortly.",
+        "meeting_id": str(meeting_id)
+    }
+
+@router.post("/{meeting_id}/transcripts/user/{target_user_id}/analysis", response_model=schemas.UserTranscriptAnalysis)
+def save_personal_analysis(
+    meeting_id: UUID,
+    target_user_id: UUID,
+    analysis_in: schemas.UserTranscriptAnalysisCreate,
+    db: Session = Depends(get_db)
+    # Auth-free internal endpoint for worker
+):
+    analysis = models.UserTranscriptAnalysis(
+        meeting_id=meeting_id,
+        user_id=target_user_id,
+        analysis_data=analysis_in.analysis_data
+    )
+    db.add(analysis)
+    try:
+        db.commit()
+        db.refresh(analysis)
+    except Exception as e:
+        db.rollback()
+        existing = db.query(models.UserTranscriptAnalysis).filter(
+            models.UserTranscriptAnalysis.meeting_id == meeting_id,
+            models.UserTranscriptAnalysis.user_id == target_user_id
+        ).first()
+        if existing:
+            existing.analysis_data = analysis_in.analysis_data
+            db.commit()
+            db.refresh(existing)
+            return existing
+        raise HTTPException(status_code=400, detail=str(e))
+    return analysis
+
 @router.get("/users/me/transcripts/aggregated", response_model=schemas.UserAggregatedTranscripts)
 def get_my_aggregated_transcripts(
     user_id: UUID = Depends(get_current_user_id),
@@ -262,24 +419,35 @@ def get_user_aggregated_transcripts(
         models.MeetingParticipant.user_id == user_id
     ).all()
     
+    # Deduplicate by meeting_id in case the user left and rejoined
+    unique_meetings: Dict[str, models.MeetingParticipant] = {}
+    for p in participants:
+        mid = str(p.meeting_id)
+        if mid not in unique_meetings:
+            unique_meetings[mid] = p
+            
     total_speaking_time = 0
     meetings_data = []
     
-    for p in participants:
-        total_speaking_time += (p.speaking_time_seconds or 0)
-        
+    for p in unique_meetings.values():
         segments = db.query(models.TranscriptSegment).filter(
             models.TranscriptSegment.meeting_id == p.meeting_id,
             models.TranscriptSegment.user_id == user_id
         ).order_by(models.TranscriptSegment.created_at.asc()).all()
         
+        meeting_speaking_time = 0
         for s in segments:
             s.meeting_title = p.meeting.title
+            if s.start_time is not None and s.end_time is not None:
+                duration_ms = max(0, s.end_time - s.start_time)
+                meeting_speaking_time += int(duration_ms / 1000)
+                
+        total_speaking_time += meeting_speaking_time
             
         meetings_data.append(schemas.UserMeetingTranscript(
             meeting_id=p.meeting_id,
             meeting_title=p.meeting.title,
-            speaking_time_seconds=p.speaking_time_seconds or 0,
+            speaking_time_seconds=meeting_speaking_time,
             transcripts=segments
         ))
     
@@ -302,8 +470,9 @@ def create_analysis(
     analysis = models.MeetingAnalysis(
         meeting_id=meeting_id,
         summary=analysis_in.summary,
-        action_items=analysis_in.action_items,
-        sentiment=analysis_in.sentiment
+        sentiment=analysis_in.sentiment,
+        mode=analysis_in.mode,
+        insights=analysis_in.insights
     )
     db.add(analysis)
     try:
@@ -315,8 +484,9 @@ def create_analysis(
         existing = db.query(models.MeetingAnalysis).filter(models.MeetingAnalysis.meeting_id == meeting_id).first()
         if existing:
             existing.summary = analysis_in.summary
-            existing.action_items = analysis_in.action_items
             existing.sentiment = analysis_in.sentiment
+            existing.mode = analysis_in.mode
+            existing.insights = analysis_in.insights
             db.commit()
             db.refresh(existing)
             return existing
@@ -332,6 +502,136 @@ def get_analysis(
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return analysis
+
+@router.post("/{meeting_id}/analysis/trigger")
+async def trigger_analysis(
+    meeting_id: UUID,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    """Manually trigger the AI analysis worker for a completed meeting.
+    Use this when the post-meeting analysis was not auto-generated.
+
+    - Only callable by a participant of the meeting.
+    - Meeting must have status 'ended'.
+    - If analysis already exists, it is served directly from the database.
+    - Only queues the AI worker if no analysis record exists yet.
+    """
+    # 1. Verify the meeting exists and has ended
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.status != "ended":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Analysis can only be triggered for ended meetings. This meeting is currently '{meeting.status}'."
+        )
+
+    # 2. Verify the caller is a participant of this meeting
+    is_participant = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.user_id == user_id
+    ).first()
+    if not is_participant:
+        raise HTTPException(status_code=403, detail="You are not a participant of this meeting")
+
+    # 3. If analysis already exists, serve it straight from the DB — no re-triggering
+    existing_analysis = db.query(models.MeetingAnalysis).filter(
+        models.MeetingAnalysis.meeting_id == meeting_id
+    ).first()
+    if existing_analysis:
+        return existing_analysis
+
+    # 4. Analysis is missing — push to the Redis queue so the AI worker generates it
+    from main import redis_client
+    import json
+    await redis_client.rpush("meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
+
+    return {
+        "status": "triggered",
+        "message": "AI analysis has been queued. Check back in 30–60 seconds.",
+        "meeting_id": str(meeting_id)
+    }
+
+# --- Action Items ---
+
+@router.get("/{meeting_id}/action-items", response_model=List[schemas.ActionItem])
+def list_action_items(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    return db.query(models.ActionItem).filter(models.ActionItem.meeting_id == meeting_id).all()
+
+@router.post("/{meeting_id}/action-items", response_model=schemas.ActionItem)
+def create_action_item(
+    meeting_id: UUID,
+    item_in: schemas.ActionItemBase,
+    db: Session = Depends(get_db)
+):
+    item = models.ActionItem(
+        meeting_id=meeting_id,
+        description=item_in.description,
+        is_completed=item_in.is_completed,
+        assignee_id=item_in.assignee_id
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+@router.patch("/action-items/{item_id}", response_model=schemas.ActionItem)
+def update_action_item(
+    item_id: UUID,
+    item_in: schemas.ActionItemUpdate,
+    db: Session = Depends(get_db)
+):
+    item = db.query(models.ActionItem).filter(models.ActionItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not found")
+    
+    if item_in.description is not None:
+        item.description = item_in.description
+    if item_in.is_completed is not None:
+        item.is_completed = item_in.is_completed
+    if item_in.assignee_id is not None:
+        item.assignee_id = item_in.assignee_id
+        
+    db.commit()
+    db.refresh(item)
+    return item
+
+# --- Decisions ---
+
+@router.get("/{meeting_id}/decisions", response_model=List[schemas.Decision])
+def list_decisions(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Decision).filter(models.Decision.meeting_id == meeting_id).all()
+
+@router.post("/{meeting_id}/decisions", response_model=schemas.Decision)
+def create_decision(
+    meeting_id: UUID,
+    decision_in: schemas.DecisionBase,
+    db: Session = Depends(get_db)
+):
+    decision = models.Decision(
+        meeting_id=meeting_id,
+        description=decision_in.description
+    )
+    db.add(decision)
+    db.commit()
+    db.refresh(decision)
+    return decision
+
+# --- Alerts (Anti-Cheat / Security) ---
+
+@router.get("/{meeting_id}/alerts", response_model=List[schemas.MeetingAlert])
+def list_meeting_alerts(
+    meeting_id: UUID,
+    db: Session = Depends(get_db)
+):
+    return db.query(models.MeetingAlert).filter(models.MeetingAlert.meeting_id == meeting_id).all()
 
 @router.post("/{meeting_id}/transcripts", response_model=schemas.TranscriptSegment)
 def create_transcript_segment(
@@ -363,16 +663,32 @@ def list_participants(
     meeting_id: UUID,
     db: Session = Depends(get_db)
 ):
+    """Returns the unique currently-active participants in a live meeting.
+    A participant is considered active if their latest session has left_at = NULL.
+    If a user left and rejoined, only their current active session row is kept.
+    """
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    
-    participants = db.query(models.MeetingParticipant).filter(
+
+    # Only rows where the participant is currently in the meeting (left_at IS NULL)
+    active_rows = db.query(models.MeetingParticipant).filter(
         models.MeetingParticipant.meeting_id == meeting_id,
         models.MeetingParticipant.left_at.is_(None)
     ).all()
 
-    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participants])
+    # Deduplicate by user_id — a rejoining user can have multiple active rows;
+    # keep the one with the highest speaking_time_seconds (most data)
+    unique: Dict[str, models.MeetingParticipant] = {}
+    for row in active_rows:
+        uid = str(row.user_id)
+        if uid not in unique or (row.speaking_time_seconds or 0) > (unique[uid].speaking_time_seconds or 0):
+            unique[uid] = row
+
+    participants = list(unique.values())
+
+    # Enrich with name/email from auth service
+    user_lookup = fetch_users_by_ids(list(unique.keys()))
     for participant in participants:
         user_data = user_lookup.get(str(participant.user_id))
         if user_data:
@@ -389,15 +705,31 @@ def list_all_participants(
     meeting_id: UUID,
     db: Session = Depends(get_db)
 ):
+    """Returns every unique participant who attended the meeting (including those who left).
+    Useful for post-meeting reports on ended meetings.
+    A user who left and rejoined multiple times is returned only once.
+    """
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    participants = db.query(models.MeetingParticipant).filter(
+    # Fetch every row regardless of left_at — covers full meeting history
+    all_rows = db.query(models.MeetingParticipant).filter(
         models.MeetingParticipant.meeting_id == meeting_id
     ).all()
 
-    user_lookup = fetch_users_by_ids([str(p.user_id) for p in participants])
+    # Deduplicate by user_id — keep the row with the highest speaking_time_seconds
+    # so the response reflects the most accurate aggregated speaking data per user
+    unique: Dict[str, models.MeetingParticipant] = {}
+    for row in all_rows:
+        uid = str(row.user_id)
+        if uid not in unique or (row.speaking_time_seconds or 0) > (unique[uid].speaking_time_seconds or 0):
+            unique[uid] = row
+
+    participants = list(unique.values())
+
+    # Enrich with name/email from auth service
+    user_lookup = fetch_users_by_ids(list(unique.keys()))
     for participant in participants:
         user_data = user_lookup.get(str(participant.user_id))
         if user_data:
@@ -498,3 +830,35 @@ def create_livekit_token(
           "identity": identity,
           "display_name": display_name
       }
+
+@router.post("/scheduled", response_model=schemas.ScheduledMeetingOut, status_code=status.HTTP_201_CREATED)
+def schedule_meeting(
+    meeting_in: schemas.ScheduledMeetingCreate,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    db_meeting = models.ScheduledMeeting(
+        creator_id=user_id,
+        title=meeting_in.title,
+        mode=meeting_in.mode,
+        scheduled_date=meeting_in.scheduled_date,
+        scheduled_start_time=meeting_in.scheduled_start_time,
+        expected_duration_min=meeting_in.expected_duration_min,
+        objectives=meeting_in.objectives,
+        participants=meeting_in.participants
+    )
+    db.add(db_meeting)
+    db.commit()
+    db.refresh(db_meeting)
+    
+    # TODO: Implement the logic to send an email with the meeting code to the participants.
+    
+    return db_meeting
+
+@router.get("/scheduled", response_model=List[schemas.ScheduledMeetingOut])
+def get_scheduled_meetings(
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    meetings = db.query(models.ScheduledMeeting).filter(models.ScheduledMeeting.creator_id == user_id).order_by(models.ScheduledMeeting.scheduled_date.asc(), models.ScheduledMeeting.scheduled_start_time.asc()).all()
+    return meetings

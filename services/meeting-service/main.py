@@ -120,25 +120,85 @@ async def handle_leave_room(sid, data):
 @sio.on("audio_chunk")
 async def handle_audio_chunk(sid, data):
     async with sio.session(sid) as session:
-        user_id = session.get('user_id')
-        user_name = session.get('user_name')
+        session_user_id = session.get('user_id')
+        session_user_name = session.get('user_name')
 
     meeting_id = data.get("meeting_id")
-    audio_bytes = data.get("audio")
     chunk_start_ms = data.get("chunk_start_ms")
     chunk_end_ms = data.get("chunk_end_ms")
 
-    if meeting_id and audio_bytes and user_id:
-        payload = {
-            "meeting_id": meeting_id,
+    # Use session values but fall back to frontend-provided values
+    user_id = session_user_id or data.get("user_id")
+    user_name = session_user_name or data.get("user_name") or user_id
+
+    audio_data = data.get("audio")
+
+    # Handle both bytes and base64 string from frontend
+    if isinstance(audio_data, (bytes, bytearray)):
+        audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+    elif isinstance(audio_data, str):
+        # Already base64 encoded
+        audio_b64 = audio_data
+    else:
+        print(f"[audio_chunk] No audio data received. data keys: {list(data.keys())}")
+        return
+
+    if not meeting_id:
+        print(f"[audio_chunk] Missing meeting_id")
+        return
+
+    if not audio_b64:
+        print(f"[audio_chunk] Empty audio")
+        return
+
+    payload = {
+        "meeting_id": meeting_id,
+        "user_id": user_id,
+        "user_name": user_name,
+        "timestamp": time.time(),
+        "chunk_start_ms": chunk_start_ms,
+        "chunk_end_ms": chunk_end_ms,
+        "audio": audio_b64
+    }
+    await redis_client.rpush("audio_queue", json.dumps(payload))
+    print(f"[audio_chunk] Queued chunk for {user_name} in meeting {meeting_id}, "
+          f"audio_size={len(audio_b64)} bytes")
+
+@sio.on("tab_switch_alert")
+async def handle_tab_switch_alert(sid, data):
+    async with sio.session(sid) as session:
+        user_id = session.get('user_id')
+        user_name = session.get('user_name', "Anonymous")
+
+    meeting_id = data.get("meeting_id")
+    if meeting_id and user_id:
+        # 1. Broadcast LIVE to the room (so the interviewer sees it instantly)
+        await sio.emit("user_tab_switched", {
             "user_id": user_id,
             "user_name": user_name,
-            "timestamp": time.time(),
-            "chunk_start_ms": chunk_start_ms,
-            "chunk_end_ms": chunk_end_ms,
-            "audio": base64.b64encode(audio_bytes).decode('utf-8')
-        }
-        await redis_client.rpush("audio_queue", json.dumps(payload))
+            "timestamp": time.time()
+        }, room=str(meeting_id), skip_sid=sid)
+        
+        # 2. Persist to DB for the final AI report
+        from core.database import SessionLocal
+        from models import MeetingAlert
+        from uuid import UUID
+        
+        db = SessionLocal()
+        try:
+            alert = MeetingAlert(
+                meeting_id=UUID(str(meeting_id)),
+                user_id=UUID(str(user_id)),
+                alert_type="tab_switch",
+                details=f"User {user_name} switched/left the tab."
+            )
+            db.add(alert)
+            db.commit()
+            print(f"Logged tab switch alert for {user_name} in meeting {meeting_id}")
+        except Exception as e:
+            print(f"Error logging alert: {e}")
+        finally:
+            db.close()
 
 # --- WebRTC Signaling ---
 @sio.on("webrtc_offer")
