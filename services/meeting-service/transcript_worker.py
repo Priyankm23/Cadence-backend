@@ -33,7 +33,7 @@ GROQ_API = os.getenv("GROQ_API")
 BUFFER_TARGET_MS = int(os.getenv("TRANSCRIPT_BUFFER_TARGET_MS", "5000"))
 BUFFER_MAX_MS = int(os.getenv("TRANSCRIPT_BUFFER_MAX_MS", "15000"))
 BUFFER_GAP_FLUSH_MS = int(os.getenv("TRANSCRIPT_BUFFER_GAP_FLUSH_MS", "1200"))
-STALE_CHUNK_SECONDS = float(os.getenv("TRANSCRIPT_STALE_CHUNK_SECONDS", "30"))
+STALE_CHUNK_SECONDS = float(os.getenv("TRANSCRIPT_STALE_CHUNK_SECONDS", "300"))
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. Transcription will fail.")
@@ -176,11 +176,60 @@ def process_audio_chunk(payload_str):
         if buffer_state["start_ms"] is None or buffer_state["end_ms"] is None:
             return
 
+        # Adaptive VAD-based Buffering / Pause Detection
         buffered_duration_ms = buffer_state["end_ms"] - buffer_state["start_ms"]
-        if buffered_duration_ms < BUFFER_TARGET_MS and buffered_duration_ms < BUFFER_MAX_MS:
+        
+        # 1. If buffer is too small, definitely keep accumulating (e.g. < 2 seconds)
+        if buffered_duration_ms < 2000:
             return
 
-        _submit_buffer(buffer_state)
+        # 2. If buffer exceeds maximum allowed duration, flush immediately to avoid excessive latency
+        if buffered_duration_ms >= BUFFER_MAX_MS:
+            print(f"[{meeting_id}] Buffer reached max duration ({buffered_duration_ms:.0f}ms). Flushing.")
+            _submit_buffer(buffer_state)
+            return
+
+        # 3. Check for a natural pause at the end of the accumulated buffer
+        raw_bytes = bytes(buffer_state["audio"])
+        audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
+        if audio_int16.size == 0:
+            return
+
+        audio_float32 = audio_int16.astype(np.float32) / 32768.0
+
+        # Run VAD to locate speech segments
+        try:
+            speech_timestamps = get_speech_timestamps_fn(
+                torch.from_numpy(audio_float32),
+                vad_model,
+                sampling_rate=16000,
+                min_speech_duration_ms=100,
+                min_silence_duration_ms=100,
+                threshold=0.3,
+            )
+        except Exception as vad_err:
+            print(f"[{meeting_id}] VAD error during buffering check: {vad_err}. Flushing by default.")
+            _submit_buffer(buffer_state)
+            return
+
+        # If there are active speech segments, check the silence gap at the end
+        if speech_timestamps:
+            last_speech_end_sample = speech_timestamps[-1]['end']
+            last_speech_end_ms = (last_speech_end_sample / 16000) * 1000
+            
+            # Silence duration at the tail end of the buffer
+            silence_duration_ms = buffered_duration_ms - last_speech_end_ms
+            
+            # If silence at the end is >= 1200ms, it is a natural pause! Safe to flush.
+            if silence_duration_ms >= 1200:
+                print(f"[{meeting_id}] Natural pause detected ({silence_duration_ms:.0f}ms silence at end of buffer). Flushing {buffered_duration_ms:.0f}ms buffer.")
+                _submit_buffer(buffer_state)
+        else:
+            # If no speech is detected at all in the buffer, and we have at least 5 seconds of audio,
+            # flush it so it can be discarded/cleared cleanly without accumulating indefinitely.
+            if buffered_duration_ms >= BUFFER_TARGET_MS:
+                print(f"[{meeting_id}] No speech detected in {buffered_duration_ms:.0f}ms buffer. Flushing to discard.")
+                _submit_buffer(buffer_state)
 
     except Exception as e:
         print(f"Error processing audio chunk: {e}")
