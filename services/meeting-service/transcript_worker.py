@@ -17,7 +17,9 @@ from types import ModuleType
 try:
     import torchaudio
 except Exception:
+    import importlib.machinery
     mock_torchaudio = ModuleType("torchaudio")
+    mock_torchaudio.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
     sys.modules["torchaudio"] = mock_torchaudio
 
 from dotenv import load_dotenv
@@ -41,13 +43,24 @@ redis_client = redis.from_url(REDIS_URL)
 
 meeting_buffers = {}
 executor = ThreadPoolExecutor(max_workers=10)
+# Set custom writable cache directory for PyTorch Hub to avoid read-only filesystem errors on cloud platforms
+import tempfile
+torch.hub.set_dir(os.path.join(tempfile.gettempdir(), "torch_hub"))
 
-vad_model, vad_utils = torch.hub.load(
-    repo_or_dir="snakers4/silero-vad",
-    model="silero_vad",
-    trust_repo=True
-)
-(get_speech_timestamps_fn, _, _, _, _) = vad_utils
+print("Loading Silero VAD model from PyTorch Hub...")
+try:
+    vad_model, vad_utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        trust_repo=True
+    )
+    (get_speech_timestamps_fn, _, _, _, _) = vad_utils
+    print("Silero VAD model loaded successfully.")
+except Exception as e:
+    print(f"FATAL ERROR loading Silero VAD model: {e}")
+    import traceback
+    traceback.print_exc()
+    raise e
 
 
 def create_wav_buffer(raw_bytes, sample_rate=16000, channels=1, sample_width=2):

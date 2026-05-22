@@ -1,5 +1,7 @@
 import socketio
-import redis.asyncio as redis
+import redis.asyncio as aioredis
+import redis
+from redis.exceptions import ConnectionError
 import json
 import base64
 import time
@@ -16,6 +18,9 @@ import subprocess
 import sys
 import os
 from contextlib import asynccontextmanager
+
+# Redis client
+redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
 
 async def redis_listener():
     while True:
@@ -35,7 +40,7 @@ async def redis_listener():
                             await sio.emit("transcript_update", data, room=str(meeting_id))
                     except Exception as e:
                         print(f"Error handling pubsub message: {e}")
-        except redis.exceptions.ConnectionError as e:
+        except ConnectionError as e:
             print(f"Redis pub/sub connection lost: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
         except Exception as e:
@@ -49,12 +54,12 @@ async def lifespan(app: FastAPI):
     
     # Start both workers as subprocesses when app starts
     transcript_worker = subprocess.Popen(
-        [sys.executable, os.path.join(BASE_DIR, "transcript_worker.py")],
+        [sys.executable, "-u", os.path.join(BASE_DIR, "transcript_worker.py")],
         stdout=sys.stdout,
         stderr=sys.stderr
     )
     ai_worker = subprocess.Popen(
-        [sys.executable, os.path.join(BASE_DIR, "ai_worker.py")],
+        [sys.executable, "-u", os.path.join(BASE_DIR, "ai_worker.py")],
         stdout=sys.stdout,
         stderr=sys.stderr
     )
@@ -71,9 +76,6 @@ async def lifespan(app: FastAPI):
     transcript_worker.terminate()
     ai_worker.terminate()
     print("Workers stopped")
-
-# Redis client
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=False)
 
 # Create Socket.io server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
