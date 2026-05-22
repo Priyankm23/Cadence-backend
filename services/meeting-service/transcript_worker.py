@@ -47,6 +47,14 @@ executor = ThreadPoolExecutor(max_workers=10)
 import tempfile
 torch.hub.set_dir(os.path.join(tempfile.gettempdir(), "torch_hub"))
 
+# Prevent PyTorch Hub from making GitHub API calls to validate fork status.
+# Render's shared/data-center IPs are heavily rate-limited by GitHub's API, causing 403 errors.
+try:
+    import torch.hub
+    torch.hub._validate_not_a_forked_repo = lambda a, b, c: True
+except Exception:
+    pass
+
 print("Loading Silero VAD model from PyTorch Hub...")
 try:
     vad_model, vad_utils = torch.hub.load(
