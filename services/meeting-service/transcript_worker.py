@@ -38,8 +38,40 @@ STALE_CHUNK_SECONDS = float(os.getenv("TRANSCRIPT_STALE_CHUNK_SECONDS", "30"))
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. Transcription will fail.")
 
-# Initialize Redis
-redis_client = redis.from_url(REDIS_URL)
+# Local loopback config inside container
+PORT = os.getenv("PORT", "8002")
+LOCAL_MEETING_SERVICE_URL = f"http://127.0.0.1:{PORT}"
+
+# Initialize Redis with resilient socket parameters
+redis_client = redis.from_url(
+    REDIS_URL,
+    socket_connect_timeout=5,
+    socket_keepalive=True,
+    retry_on_timeout=True
+)
+
+def call_meeting_service(method, path, **kwargs):
+    """
+    Robust internal HTTP helper that calls MEETING_SERVICE_URL first, 
+    and automatically falls back to LOCAL_MEETING_SERVICE_URL (127.0.0.1) 
+    if the configured service URL fails (e.g. Hairpin NAT / loopback blocks).
+    """
+    url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        response = httpx.request(method, url, **kwargs)
+        if response.status_code < 500:
+            return response
+        print(f"[{method}] {url} returned HTTP {response.status_code}. Trying local fallback...")
+    except Exception as e:
+        print(f"[{method}] {url} failed: {e}. Trying local fallback...")
+        
+    local_url = f"{LOCAL_MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        print(f"[{method}] Falling back to local URL: {local_url}")
+        return httpx.request(method, local_url, **kwargs)
+    except Exception as fallback_e:
+        print(f"[{method}] Local fallback to {local_url} also failed: {fallback_e}")
+        raise fallback_e
 
 meeting_buffers = {}
 executor = ThreadPoolExecutor(max_workers=10)
@@ -303,8 +335,9 @@ def _flush_buffer(buffer_state):
             transcript_payload["start_time"] = int(start_ms)
             transcript_payload["end_time"] = int(end_ms)
 
-        save_response = httpx.post(
-            f"{MEETING_SERVICE_URL}/meetings/{meeting_uuid}/transcripts",
+        save_response = call_meeting_service(
+            "POST",
+            f"meetings/{meeting_uuid}/transcripts",
             json=transcript_payload,
             timeout=10.0
         )
@@ -332,7 +365,7 @@ def main():
 
     while True:
         try:
-            result = redis_client.blpop("audio_queue", timeout=0)
+            result = redis_client.blpop("audio_queue", timeout=30)
             if result:
                 _, payload_str = result
                 process_audio_chunk(payload_str)

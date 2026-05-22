@@ -14,19 +14,51 @@ GROQ_API = os.getenv("GROQ_API")
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
 
-# Initialize Redis
-redis_client = redis.from_url(REDIS_URL)
+# Local loopback config inside container
+PORT = os.getenv("PORT", "8002")
+LOCAL_MEETING_SERVICE_URL = f"http://127.0.0.1:{PORT}"
+
+# Initialize Redis with resilient socket parameters
+redis_client = redis.from_url(
+    REDIS_URL,
+    socket_connect_timeout=5,
+    socket_keepalive=True,
+    retry_on_timeout=True
+)
 
 # Initialize Celery client (to trigger notification-service)
 from celery import Celery
 celery_client = Celery("ai_worker", broker=REDIS_URL)
+
+def call_meeting_service(method, path, **kwargs):
+    """
+    Robust internal HTTP helper that calls MEETING_SERVICE_URL first, 
+    and automatically falls back to LOCAL_MEETING_SERVICE_URL (127.0.0.1) 
+    if the configured service URL fails (e.g. Hairpin NAT / loopback blocks).
+    """
+    url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        response = httpx.request(method, url, **kwargs)
+        if response.status_code < 500:
+            return response
+        print(f"[{method}] {url} returned HTTP {response.status_code}. Trying local fallback...")
+    except Exception as e:
+        print(f"[{method}] {url} failed: {e}. Trying local fallback...")
+        
+    local_url = f"{LOCAL_MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        print(f"[{method}] Falling back to local URL: {local_url}")
+        return httpx.request(method, local_url, **kwargs)
+    except Exception as fallback_e:
+        print(f"[{method}] Local fallback to {local_url} also failed: {fallback_e}")
+        raise fallback_e
 
 def generate_meeting_report(meeting_id):
     print(f"[{meeting_id}] STARTING ANALYSIS...")
     
     # 0. Fetch meeting details via the internal endpoint (no JWT required for service-to-service)
     try:
-        meeting_resp = httpx.get(f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/internal", timeout=10.0)
+        meeting_resp = call_meeting_service("GET", f"meetings/{meeting_id}/internal", timeout=10.0)
         if meeting_resp.status_code != 200:
             print(f"[{meeting_id}] ERROR: Failed to fetch meeting details: {meeting_resp.status_code} - {meeting_resp.text}")
             return
@@ -39,7 +71,7 @@ def generate_meeting_report(meeting_id):
 
     # 1. Fetch transcripts
     try:
-        response = httpx.get(f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/transcripts", timeout=10.0)
+        response = call_meeting_service("GET", f"meetings/{meeting_id}/transcripts", timeout=10.0)
         if response.status_code != 200:
             print(f"[{meeting_id}] ERROR: Failed to fetch transcripts: {response.status_code}")
             return
@@ -51,7 +83,7 @@ def generate_meeting_report(meeting_id):
     # 1.1 Fetch alerts (for anti-cheat detection)
     alerts_summary = ""
     try:
-        alerts_resp = httpx.get(f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/alerts", timeout=5.0)
+        alerts_resp = call_meeting_service("GET", f"meetings/{meeting_id}/alerts", timeout=5.0)
         if alerts_resp.status_code == 200:
             alerts = alerts_resp.json()
             tab_switches = [a for a in alerts if a.get("alert_type") == "tab_switch"]
@@ -154,8 +186,9 @@ Please return a JSON object with the following structure:
     # Action Items
     for item in ai_output.get("action_items", []):
         try:
-            httpx.post(
-                f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/action-items",
+            call_meeting_service(
+                "POST",
+                f"meetings/{meeting_id}/action-items",
                 json={"description": item.get("description", ""), "is_completed": False},
                 timeout=5.0
             )
@@ -165,8 +198,9 @@ Please return a JSON object with the following structure:
     # Decisions
     for dec in ai_output.get("decisions", []):
         try:
-            httpx.post(
-                f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/decisions",
+            call_meeting_service(
+                "POST",
+                f"meetings/{meeting_id}/decisions",
                 json={"description": dec},
                 timeout=5.0
             )
@@ -182,8 +216,9 @@ Please return a JSON object with the following structure:
             "insights": ai_output.get("insights", {})
         }
         
-        save_res = httpx.post(
-            f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/analysis",
+        save_res = call_meeting_service(
+            "POST",
+            f"meetings/{meeting_id}/analysis",
             json=save_payload,
             timeout=10.0
         )
@@ -219,7 +254,7 @@ def generate_personal_analysis(meeting_id, user_id):
     print(f"[{meeting_id} - {user_id}] STARTING PERSONAL ANALYSIS...")
     
     try:
-        response = httpx.get(f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/transcripts/user/{user_id}", timeout=10.0)
+        response = call_meeting_service("GET", f"meetings/{meeting_id}/transcripts/user/{user_id}", timeout=10.0)
         if response.status_code != 200:
             print(f"[{meeting_id} - {user_id}] ERROR: Failed to fetch transcripts.")
             return
@@ -285,8 +320,9 @@ Please analyze this individual's performance and return a JSON object with the f
         return
 
     try:
-        save_res = httpx.post(
-            f"{MEETING_SERVICE_URL}/meetings/{meeting_id}/transcripts/user/{user_id}/analysis",
+        save_res = call_meeting_service(
+            "POST",
+            f"meetings/{meeting_id}/transcripts/user/{user_id}/analysis",
             json={"analysis_data": ai_output},
             timeout=10.0
         )
@@ -303,7 +339,7 @@ def main():
     
     while True:
         try:
-            result = redis_client.blpop(["meeting_ended_queue", "personal_analysis_queue"], timeout=0)
+            result = redis_client.blpop(["meeting_ended_queue", "personal_analysis_queue"], timeout=30)
             if result:
                 queue_name, payload_str = result
                 payload = json.loads(payload_str)
