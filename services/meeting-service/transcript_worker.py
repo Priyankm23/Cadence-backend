@@ -245,16 +245,9 @@ def _flush_buffer(buffer_state):
     )
 
     if not speech_timestamps:
-        # FIX: Log when VAD rejects so you can see it happening in logs.
-        # Also apply RMS fallback — if audio has energy but VAD missed it,
-        # send to Whisper anyway rather than silently dropping.
         rms = np.sqrt(np.mean(audio_float32 ** 2))
-        print(f"[{meeting_id}] VAD found no speech (RMS={rms:.4f}). "
-              f"{'Sending to Whisper via RMS fallback.' if rms > 0.005 else 'Truly silent, skipping.'}")
-        if rms <= 0.005:
-            # Genuinely silent — skip
-            return
-        # Has energy but VAD missed — proceed to Whisper anyway
+        print(f"[{meeting_id}] VAD found no speech (RMS={rms:.4f}). Skipping chunk to prevent Whisper hallucinations.")
+        return
 
     # Use the original int16 raw bytes for the WAV file — Whisper expects this.
     wav_buffer = create_wav_buffer(raw_bytes)
