@@ -10,33 +10,12 @@ from routes import meeting
 import models
 from core.database import engine
 from core.config import settings
-from jose import jwt, JWTError
+from core.security import decode_token
 
-# Redis client
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=False)
-
-# Create Socket.io server
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-app = FastAPI(title="Meeting Service")
-
-# Wrap FastAPI app with Socket.io ASGI app
-sio_app = socketio.ASGIApp(sio, app)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(meeting.router)
-
-def decode_token(token: str) -> dict:
-    try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-    except JWTError:
-        raise ValueError("Invalid token")
+import subprocess
+import sys
+import os
+from contextlib import asynccontextmanager
 
 async def redis_listener():
     while True:
@@ -63,9 +42,56 @@ async def redis_listener():
             print(f"Unexpected error in redis_listener: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(redis_listener())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    
+    # Start both workers as subprocesses when app starts
+    transcript_worker = subprocess.Popen(
+        [sys.executable, os.path.join(BASE_DIR, "transcript_worker.py")],
+        stdout=sys.stdout,
+        stderr=sys.stderr
+    )
+    ai_worker = subprocess.Popen(
+        [sys.executable, os.path.join(BASE_DIR, "ai_worker.py")],
+        stdout=sys.stdout,
+        stderr=sys.stderr
+    )
+    print("Transcript worker started")
+    print("AI worker started")
+    
+    listener_task = asyncio.create_task(redis_listener())
+    print("Redis listener started")
+    
+    yield  # app runs here
+    
+    # Cleanup when app shuts down
+    listener_task.cancel()
+    transcript_worker.terminate()
+    ai_worker.terminate()
+    print("Workers stopped")
+
+# Redis client
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=False)
+
+# Create Socket.io server
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+app = FastAPI(title="Meeting Service", lifespan=lifespan)
+
+# Wrap FastAPI app with Socket.io ASGI app
+sio_app = socketio.ASGIApp(sio, app)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(meeting.router)
+
 
 @app.get("/")
 def read_root():
@@ -209,35 +235,35 @@ async def handle_tab_switch_alert(sid, data):
             db.close()
 
 # --- WebRTC Signaling ---
-@sio.on("webrtc_offer")
-async def handle_webrtc_offer(sid, data):
-    async with sio.session(sid) as session:
-        user_id = session.get('user_id')
+# @sio.on("webrtc_offer")
+# async def handle_webrtc_offer(sid, data):
+#     async with sio.session(sid) as session:
+#         user_id = session.get('user_id')
         
-    meeting_id = data.get("meeting_id")
-    if meeting_id:
-        # Broadcast the offer to everyone else in the room
-        data["sender_id"] = user_id
-        await sio.emit("webrtc_offer", data, room=str(meeting_id), skip_sid=sid)
+#     meeting_id = data.get("meeting_id")
+#     if meeting_id:
+#         # Broadcast the offer to everyone else in the room
+#         data["sender_id"] = user_id
+#         await sio.emit("webrtc_offer", data, room=str(meeting_id), skip_sid=sid)
 
-@sio.on("webrtc_answer")
-async def handle_webrtc_answer(sid, data):
-    async with sio.session(sid) as session:
-        user_id = session.get('user_id')
+# @sio.on("webrtc_answer")
+# async def handle_webrtc_answer(sid, data):
+#     async with sio.session(sid) as session:
+#         user_id = session.get('user_id')
         
-    meeting_id = data.get("meeting_id")
-    if meeting_id:
-        # Broadcast the answer to everyone else in the room
-        data["sender_id"] = user_id
-        await sio.emit("webrtc_answer", data, room=str(meeting_id), skip_sid=sid)
+#     meeting_id = data.get("meeting_id")
+#     if meeting_id:
+#         # Broadcast the answer to everyone else in the room
+#         data["sender_id"] = user_id
+#         await sio.emit("webrtc_answer", data, room=str(meeting_id), skip_sid=sid)
 
-@sio.on("ice_candidate")
-async def handle_ice_candidate(sid, data):
-    async with sio.session(sid) as session:
-        user_id = session.get('user_id')
+# @sio.on("ice_candidate")
+# async def handle_ice_candidate(sid, data):
+#     async with sio.session(sid) as session:
+#         user_id = session.get('user_id')
         
-    meeting_id = data.get("meeting_id")
-    if meeting_id:
-        # Broadcast the candidate to everyone else in the room
-        data["sender_id"] = user_id
-        await sio.emit("ice_candidate", data, room=str(meeting_id), skip_sid=sid)    
+#     meeting_id = data.get("meeting_id")
+#     if meeting_id:
+#         # Broadcast the candidate to everyone else in the room
+#         data["sender_id"] = user_id
+#         await sio.emit("ice_candidate", data, room=str(meeting_id), skip_sid=sid)    

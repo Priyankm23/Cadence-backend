@@ -12,3 +12,6 @@ passlib[bcrypt]
 redis
 livekit-api
 httpx
+celery==5.3.6
+numpy
+packaging
