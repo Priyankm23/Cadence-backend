@@ -62,7 +62,3 @@ async def proxy_auth(request: Request, path: str):
 @router.api_route("/meetings/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy_meetings(request: Request, path: str):
     return await proxy_request(request, settings.MEETING_SERVICE_URL)
-
-@router.api_route("/ai/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def proxy_ai(request: Request, path: str):
-    return await proxy_request(request, settings.AI_SERVICE_URL)

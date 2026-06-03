@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Summary: {{ meeting_title }}</title>
+    <style>
+        /* Modern reset & typography */
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+        
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100% !important;
+            background-color: #f8fafc;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            color: #1e293b;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        table {
+            border-collapse: collapse;
+            mso-table-lspace: 0pt;
+            mso-table-rspace: 0pt;
+        }
+        
+        img {
+            border: 0;
+            height: auto;
+            line-height: 100%;
+            outline: none;
+            text-decoration: none;
+        }
+        
+        .email-container {
+            max-width: 600px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(79, 70, 229, 0.04);
+            border: 1px solid rgba(226, 232, 240, 0.8);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #004d40 0%, #00796b 100%);
+            padding: 36px 40px;
+            color: #ffffff;
+            position: relative;
+        }
+        
+        .brand-badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.15);
+            padding: 6px 14px;
+            border-radius: 99px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .meeting-title {
+            font-size: 26px;
+            font-weight: 700;
+            margin: 0;
+            line-height: 1.3;
+            letter-spacing: -0.02em;
+        }
+        
+        .meta-row {
+            margin-top: 16px;
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.9);
+            font-weight: 500;
+        }
+        
+        .meta-separator {
+            margin: 0 8px;
+            opacity: 0.5;
+        }
+        
+        .content-body {
+            padding: 40px;
+        }
+        
+        .section-card {
+            background-color: #ffffff;
+            border-radius: 12px;
+            border: 1px solid #f1f5f9;
+            padding: 24px;
+            margin-bottom: 28px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.01), 0 2px 4px -1px rgba(0, 0, 0, 0.01);
+        }
+        
+        .section-header {
+            margin-bottom: 18px;
+            border-bottom: 1px solid #f8fafc;
+            padding-bottom: 10px;
+        }
+        
+        .section-icon {
+            font-size: 20px;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 650;
+            color: #0f172a;
+            margin: 0;
+            letter-spacing: -0.01em;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        
+        /* Specific section stylings */
+        .summary-card {
+            border-left: 4px solid #00796b;
+        }
+        
+        .summary-text {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #334155;
+            margin: 0;
+        }
+        
+        .action-card {
+            border-left: 4px solid #f59e0b;
+        }
+        
+        .action-list {
+            margin: 0;
+            padding: 0;
+        }
+        
+        .action-item {
+            display: table;
+            width: 100%;
+            margin-bottom: 14px;
+            font-size: 15px;
+            color: #334155;
+        }
+        
+        .action-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .action-checkbox-col {
+            display: table-cell;
+            width: 28px;
+            vertical-align: top;
+            padding-top: 2px;
+        }
+        
+        .action-checkbox-icon {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border-radius: 6px;
+            border: 2px solid #cbd5e1;
+            background-color: #f8fafc;
+        }
+        
+        .action-text-col {
+            display: table-cell;
+            vertical-align: middle;
+            padding-left: 8px;
+            line-height: 1.45;
+        }
+        
+        .action-badge-col {
+            display: table-cell;
+            text-align: right;
+            vertical-align: middle;
+            padding-left: 12px;
+        }
+        
+        .owner-badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 99px;
+            background-color: #e0e7ff;
+            color: #4338ca;
+            border: 1px solid #c7d2fe;
+            white-space: nowrap;
+        }
+        
+        .owner-badge.unassigned {
+            background-color: #f1f5f9;
+            color: #64748b;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .decision-card {
+            border-left: 4px solid #10b981;
+        }
+        
+        .decision-list {
+            margin: 0;
+            padding: 0;
+        }
+        
+        .decision-item {
+            display: table;
+            width: 100%;
+            margin-bottom: 12px;
+            font-size: 15px;
+            color: #334155;
+        }
+        
+        .decision-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .decision-icon-col {
+            display: table-cell;
+            width: 24px;
+            vertical-align: top;
+            padding-top: 2px;
+        }
+        
+        .decision-icon {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border-radius: 99px;
+            background-color: #d1fae5;
+            color: #065f46;
+            text-align: center;
+            font-size: 10px;
+            font-weight: bold;
+            line-height: 16px;
+        }
+        
+        .decision-text-col {
+            display: table-cell;
+            vertical-align: middle;
+            padding-left: 10px;
+            line-height: 1.45;
+        }
+        
+        .btn-container {
+            text-align: center;
+            margin-top: 36px;
+            margin-bottom: 12px;
+        }
+        
+        .cta-btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #00796b 0%, #004d40 100%);
+            background-color: #00796b;
+            color: #ffffff !important;
+            padding: 14px 36px;
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 77, 64, 0.15);
+        }
+        
+        .footer {
+            background-color: #fafbfd;
+            padding: 32px 40px;
+            border-top: 1px solid #f1f5f9;
+            text-align: center;
+            font-size: 13px;
+            color: #64748b;
+            line-height: 1.6;
+        }
+        
+        .footer-brand {
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 6px;
+            letter-spacing: -0.01em;
+        }
+        
+        /* Mobile responsive adjustments */
+        @media only screen and (max-width: 600px) {
+            .email-container {
+                margin: 0 auto;
+                border-radius: 0;
+                border-left: none;
+                border-right: none;
+            }
+            .header {
+                padding: 28px 24px;
+            }
+            .content-body {
+                padding: 28px 24px;
+            }
+            .section-card {
+                padding: 20px 16px;
+            }
+            .action-item {
+                display: block;
+                margin-bottom: 16px;
+            }
+            .action-checkbox-col {
+                display: inline-block;
+                vertical-align: middle;
+            }
+            .action-text-col {
+                display: inline-block;
+                vertical-align: middle;
+                width: calc(100% - 40px);
+                padding-left: 8px;
+            }
+            .action-badge-col {
+                display: block;
+                text-align: left;
+                padding-left: 28px;
+                margin-top: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <!-- Header Section -->
+        <div class="header">
+            <img src="https://res.cloudinary.com/dv7iah7yv/image/upload/v1780324961/cadence_logo_1_anspsz.png" alt="Cadence AI Logo" style="height: 40px; margin-bottom: 16px; display: block;" />
+            <h1 class="meeting-title">{{ meeting_title }}</h1>
+            <div class="meta-row">
+                <span>{{ date }}</span>
+                <span class="meta-separator">•</span>
+                <span>Duration: <strong>{{ duration }}</strong> mins</span>
+            </div>
+        </div>
+
+        <!-- Body Content -->
+        <div class="content-body">
+            
+            <!-- Executive Summary -->
+            <div class="section-card summary-card">
+                <div class="section-header">
+                    <span class="section-icon">✨</span>
+                    <h3 class="section-title">Executive Summary</h3>
+                </div>
+                <p class="summary-text">{{ summary }}</p>
+            </div>
+
+            <!-- Action Items -->
+            {% if action_items %}
+            <div class="section-card action-card">
+                <div class="section-header">
+                    <span class="section-icon">🎯</span>
+                    <h3 class="section-title">Action Items</h3>
+                </div>
+                <div class="action-list">
+                    {% for item in action_items %}
+                    <div class="action-item">
+                        <div class="action-checkbox-col">
+                            <span class="action-checkbox-icon"></span>
+                        </div>
+                        <div class="action-text-col">
+                            {{ item.task }}
+                        </div>
+                        <div class="action-badge-col">
+                            {% if item.owner and item.owner != "Unassigned" %}
+                            <span class="owner-badge">{{ item.owner }}</span>
+                            {% else %}
+                            <span class="owner-badge unassigned">Unassigned</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Decisions -->
+            {% if decisions %}
+            <div class="section-card decision-card">
+                <div class="section-header">
+                    <span class="section-icon">✅</span>
+                    <h3 class="section-title">Decisions Made</h3>
+                </div>
+                <div class="decision-list">
+                    {% for decision in decisions %}
+                    <div class="decision-item">
+                        <div class="decision-icon-col">
+                            <span class="decision-icon">✓</span>
+                        </div>
+                        <div class="decision-text-col">
+                            {{ decision }}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- CTA Button -->
+            <div class="btn-container">
+                <a href="{{ dashboard_url }}/meetings/{{ meeting_id }}" class="cta-btn">View Full Report</a>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <div class="footer-brand">Cadence AI Platform</div>
+            <div>This is an automated intelligence summary generated from your recent meeting transcript.</div>
+        </div>
+    </div>
+</body>
+</html>

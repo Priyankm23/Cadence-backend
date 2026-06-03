@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   redis:
     image: redis:7-alpine
@@ -31,26 +29,3 @@ services:
       - "8002:8002"
     depends_on:
       - redis
-
-  transcript-worker:
-    build: ./services/transcript-service
-    container_name: transcript-worker
-    env_file: ./services/transcript-service/.env
-    depends_on:
-      - redis
-
-  ai-worker:
-    build: ./services/ai-service
-    container_name: ai-worker
-    env_file: ./services/ai-service/.env
-    depends_on:
-      - redis
-
-# notification-worker is disabled as credentials are not provided
-# notification-worker:
-#   build: ./services/notification-service
-#   container_name: notification-worker
-#   command: celery -A worker worker --loglevel=info
-#   env_file: ./services/notification-service/.env
-#   depends_on:
-#     - redis

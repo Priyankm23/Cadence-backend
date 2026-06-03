@@ -1,31 +1,62 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from sqlalchemy.orm import Session
 from typing import List, AnyStr, Dict, Tuple
 from uuid import UUID
 from datetime import datetime, timezone
-import httpx
+import os
+import random
+import string
 
+from sqlalchemy import or_
 from core.database import get_db
 from core.config import settings
 from livekit import api
 from core.security import decode_token
 import models, schemas
 
+from celery import Celery
+celery_client = Celery("meeting_service", broker=settings.REDIS_URL)
+
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
-def fetch_users_by_ids(user_ids: list[str]) -> Dict[str, dict]:
+def generate_join_code(db: Session) -> str:
+# ... (rest of imports remains the same, just adding or_)
+    """Generates a unique 10-letter join code (e.g., abc-defg-hij)"""
+    while True:
+        parts = [
+            ''.join(random.choices(string.ascii_lowercase, k=3)),
+            ''.join(random.choices(string.ascii_lowercase, k=4)),
+            ''.join(random.choices(string.ascii_lowercase, k=3))
+        ]
+        code = f"{parts[0]}-{parts[1]}-{parts[2]}"
+        
+        # Check if it exists in either Meeting or ScheduledMeeting
+        exists_in_meeting = db.query(models.Meeting).filter(models.Meeting.join_code == code).first()
+        exists_in_scheduled = db.query(models.ScheduledMeeting).filter(models.ScheduledMeeting.join_code == code).first()
+        
+        if not exists_in_meeting and not exists_in_scheduled:
+            return code
+
+def fetch_users_by_ids(db: Session, user_ids: list[str]) -> Dict[str, models.User]:
     if not user_ids:
         return {}
 
+    uuids = []
+    for uid in user_ids:
+        try:
+            if isinstance(uid, UUID):
+                uuids.append(uid)
+            else:
+                uuids.append(UUID(str(uid)))
+        except ValueError:
+            continue
+
     try:
-        auth_url = f"{settings.AUTH_SERVICE_URL}/auth/users/batch"
-        response = httpx.post(auth_url, json={"user_ids": user_ids}, timeout=10)
-        response.raise_for_status()
-        users = response.json()
+        users = db.query(models.User).filter(models.User.id.in_(uuids)).all()
     except Exception:
         users = []
 
-    return {str(u["id"]): u for u in users}
+    return {str(u.id): u for u in users}
 
 def get_current_user_id(authorization: str = Header(...)) -> UUID:
     try:
@@ -38,16 +69,39 @@ def get_current_user_id(authorization: str = Header(...)) -> UUID:
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or missing token")
     
-def get_current_user_name(authorization: str = Header(...)) -> AnyStr:
+def get_current_user_name(
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+) -> AnyStr:
     try:
         token = authorization.split(" ")[1]
         payload = decode_token(token)
-        user_name = payload.get("name") or payload.get("data", {}).get("name")
-        if not user_name:
-            raise HTTPException(status_code=403, detail="Invalid Token - user_name missing from the token")
-        return user_name
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user = db.query(models.User).filter(models.User.id == UUID(user_id)).first()
+        if not user or not user.name:
+            raise HTTPException(status_code=404, detail="User not found or name missing")
+        return user.name
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or missing or modified Token")
+        raise HTTPException(status_code=401, detail="Invalid or missing or expired Token")
+
+def get_current_user_email(
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+) -> AnyStr:
+    try:
+        token = authorization.split(" ")[1]
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        
+        user = db.query(models.User).filter(models.User.id == UUID(user_id)).first()
+        return user.email if user else None
+    except Exception:
+        return None
 
 @router.post("/", response_model=schemas.Meeting)
 def create_meeting(
@@ -56,8 +110,10 @@ def create_meeting(
     user_id: UUID = Depends(get_current_user_id),
     user_name: AnyStr = Depends(get_current_user_name)
 ):
+    join_code = generate_join_code(db)
     meeting = models.Meeting(
         title=meeting_in.title,
+        join_code=join_code,
         creator_id=user_id,
         status="active",
         mode=meeting_in.mode
@@ -96,12 +152,189 @@ def list_meetings(
     ).order_by(models.Meeting.created_at.desc()).all()
 
     creator_ids = list({str(m.creator_id) for m in meetings})
-    creator_lookup = fetch_users_by_ids(creator_ids)
+    creator_lookup = fetch_users_by_ids(db, creator_ids)
     for meeting in meetings:
         creator_data = creator_lookup.get(str(meeting.creator_id))
-        meeting.creator_name = creator_data.get("name") if creator_data else None
+        meeting.creator_name = creator_data.name if creator_data else None
 
     return meetings
+
+@router.post("/scheduled", response_model=schemas.ScheduledMeetingOut, status_code=status.HTTP_201_CREATED)
+def schedule_meeting(
+    meeting_in: schemas.ScheduledMeetingCreate,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id),
+    user_name: AnyStr = Depends(get_current_user_name)
+):
+    join_code = generate_join_code(db)
+    db_meeting = models.ScheduledMeeting(
+        creator_id=user_id,
+        join_code=join_code,
+        title=meeting_in.title,
+        mode=meeting_in.mode,
+        scheduled_date=meeting_in.scheduled_date,
+        scheduled_start_time=meeting_in.scheduled_start_time,
+        expected_duration_min=meeting_in.expected_duration_min,
+        objectives=meeting_in.objectives,
+        participants=meeting_in.participants
+    )
+    db.add(db_meeting)
+    db.commit()
+    db.refresh(db_meeting)
+    
+    # Send an email with the meeting code to the participants.
+    frontend_url = os.getenv("FRONTEND_URL", "https://cadence-meeting-intelligence.vercel.app")
+    join_url = f"{frontend_url}"
+    
+    invite_data = {
+        "title": meeting_in.title,
+        "date": meeting_in.scheduled_date,
+        "time": meeting_in.scheduled_start_time,
+        "duration": meeting_in.expected_duration_min,
+        "objectives": meeting_in.objectives,
+        "host_name": user_name,
+        "join_url": join_url,
+        "join_code": join_code
+    }
+    
+    if meeting_in.participants:
+        # 1. Get host's email from local DB using user_id
+        host_user = db.query(models.User).filter(models.User.id == user_id).first()
+        host_email = host_user.email if host_user else None
+        
+        # 2. Build complete recipient list (host + participants)
+        all_recipients = list(set(meeting_in.participants)) # Deduplicate
+        if host_email and host_email not in all_recipients:
+            all_recipients.append(host_email)
+
+        for participant_email in all_recipients:
+            try:
+                celery_client.send_task(
+                    "send_scheduled_meeting_invite_email",
+                    kwargs={
+                        "to_email": participant_email,
+                        "invite_data": invite_data
+                    }
+                )
+            except Exception as e:
+                print(f"Failed to schedule email for {participant_email}: {e}")
+    
+    return db_meeting
+
+@router.get("/scheduled", response_model=List[schemas.ScheduledMeetingOut])
+def get_scheduled_meetings(
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id),
+    user_email: AnyStr = Depends(get_current_user_email)
+):
+    # Filter for meetings where user is the creator OR their email is in the participants list
+    # Only return scheduled meetings that haven't started (no Meeting record) or are currently live (Meeting is active)
+    query = db.query(models.ScheduledMeeting).outerjoin(
+        models.Meeting, models.ScheduledMeeting.id == models.Meeting.id
+    ).filter(
+        or_(
+            models.Meeting.id.is_(None),
+            models.Meeting.status == "active"
+        )
+    )
+    
+    if user_email:
+        # Cast to JSONB for Postgres 'contains' operator support
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import JSONB
+        query = query.filter(
+            or_(
+                models.ScheduledMeeting.creator_id == user_id,
+                cast(models.ScheduledMeeting.participants, JSONB).contains([user_email])
+            )
+        )
+    else:
+        query = query.filter(models.ScheduledMeeting.creator_id == user_id)
+
+    meetings = query.order_by(
+        models.ScheduledMeeting.scheduled_date.asc(), 
+        models.ScheduledMeeting.scheduled_start_time.asc()
+    ).all()
+
+    if meetings:
+        active_meeting_ids = {
+            m.id for m in db.query(models.Meeting.id).filter(
+                models.Meeting.id.in_([s.id for s in meetings]),
+                models.Meeting.status == "active"
+            ).all()
+        }
+        for s in meetings:
+            s.is_live = s.id in active_meeting_ids
+    else:
+        active_meeting_ids = set()
+
+    return meetings
+
+@router.post("/internal/users/sync", status_code=status.HTTP_200_OK)
+def sync_user(
+    user_in: schemas.UserSync,
+    db: Session = Depends(get_db)
+):
+    """Internal endpoint to sync user data from auth-service."""
+    db_user = db.query(models.User).filter(models.User.id == user_in.id).first()
+    if db_user:
+        db_user.email = user_in.email
+        db_user.name = user_in.name
+    else:
+        db_user = models.User(
+            id=user_in.id,
+            email=user_in.email,
+            name=user_in.name
+        )
+        db.add(db_user)
+    
+    db.commit()
+    return {"status": "success"}
+
+@router.post("/webhook")
+async def livekit_webhook(request: Request, db: Session = Depends(get_db)):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    body = await request.body()
+    
+    try:
+        verifier = api.TokenVerifier(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+        receiver = api.WebhookReceiver(verifier)
+        event = receiver.receive(body.decode('utf-8'), auth_header)
+    except Exception as e:
+        print(f"[Webhook] Failed to verify signature: {e}")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    if event.event == "room_finished":
+        room_name = event.room.name
+        print(f"[Webhook] Room {room_name} finished. Finalizing meeting...")
+        
+        try:
+            meeting_id = UUID(room_name)
+            meeting = db.query(models.Meeting).filter(
+                models.Meeting.id == meeting_id,
+                models.Meeting.status != "ended"
+            ).first()
+
+            if meeting:
+                meeting.status = "ended"
+                meeting.ended_at = datetime.now(timezone.utc)
+                if meeting.created_at:
+                    meeting.duration_seconds = int((meeting.ended_at - meeting.created_at).total_seconds())
+                
+                db.commit()
+                print(f"[Webhook] Meeting {meeting_id} marked as ended.")
+
+                from main import redis_client
+                import json
+                await redis_client.rpush("meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
+                print(f"[Webhook] Triggered AI generation for meeting {meeting_id}.")
+        except Exception as e:
+            print(f"[Webhook] Error processing room_finished for {room_name}: {e}")
+
+    return {"status": "success"}
 
 @router.get("/action-items/last-completed", response_model=list[schemas.MeetingActionItems])
 def get_action_items_last_completed(
@@ -163,9 +396,8 @@ def get_meeting(
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    creator_lookup = fetch_users_by_ids([str(meeting.creator_id)])
-    creator_data = creator_lookup.get(str(meeting.creator_id))
-    meeting.creator_name = creator_data.get("name") if creator_data else None
+    creator_user = db.query(models.User).filter(models.User.id == meeting.creator_id).first()
+    meeting.creator_name = creator_user.name if creator_user else None
     return meeting
 
 @router.post("/{meeting_id}/end", response_model=schemas.Meeting)
@@ -259,8 +491,8 @@ def get_transcripts_with_stats(
     all_user_ids = {str(p.user_id) for p in participant_rows}
     all_user_ids.update(per_user.keys())
 
-    # Fetch user details (name, email) from auth service
-    user_lookup = fetch_users_by_ids(list(all_user_ids))
+    # Fetch user details (name, email) from local users table
+    user_lookup = fetch_users_by_ids(db, list(all_user_ids))
 
     participants_stats: list[schemas.ParticipantSpeakingStat] = []
     for user_id_str in all_user_ids:
@@ -270,12 +502,12 @@ def get_transcripts_with_stats(
             speaking_percentage = round((speaking_seconds / total_meeting_seconds) * 100, 2)
 
         user_data = user_lookup.get(user_id_str)
-        # If user data is missing from auth service, we try to use display_name from meeting_participants
+        # If user data is missing, we try to use display_name from meeting_participants
         display_name = None
         user_email = None
         if user_data:
-            display_name = user_data.get("name")
-            user_email = user_data.get("email")
+            display_name = user_data.name
+            user_email = user_data.email
         else:
             # Fallback to the first participant record we find for this user
             p_record = next((pr for pr in participant_rows if str(pr.user_id) == user_id_str), None)
@@ -687,13 +919,14 @@ def list_participants(
 
     participants = list(unique.values())
 
-    # Enrich with name/email from auth service
-    user_lookup = fetch_users_by_ids(list(unique.keys()))
+    # Enrich with name/email from local users table
+    user_lookup = fetch_users_by_ids(db, list(unique.keys()))
     for participant in participants:
+        participant.meeting_name = meeting.title
         user_data = user_lookup.get(str(participant.user_id))
         if user_data:
-            participant.user_name = user_data.get("name")
-            participant.email = user_data.get("email")
+            participant.user_name = user_data.name
+            participant.email = user_data.email
         else:
             participant.user_name = None
             participant.email = None
@@ -728,29 +961,108 @@ def list_all_participants(
 
     participants = list(unique.values())
 
-    # Enrich with name/email from auth service
-    user_lookup = fetch_users_by_ids(list(unique.keys()))
+    # Enrich with name/email from local users table
+    user_lookup = fetch_users_by_ids(db, list(unique.keys()))
     for participant in participants:
+        participant.meeting_name = meeting.title
         user_data = user_lookup.get(str(participant.user_id))
         if user_data:
-            participant.user_name = user_data.get("name")
-            participant.email = user_data.get("email")
+            participant.user_name = user_data.name
+            participant.email = user_data.email
         else:
             participant.user_name = None
             participant.email = None
 
     return participants
 
-@router.post("/{meeting_id}/join", response_model=schemas.MeetingParticipant)
-def join_meeting(
-    meeting_id: UUID,
+@router.post("/{join_code}/join", response_model=schemas.MeetingParticipant)
+async def join_meeting(
+    join_code: str,
     participant_in: schemas.MeetingParticipantCreate,
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    # 1. Try to find an active meeting with this join code
+    meeting = db.query(models.Meeting).filter(models.Meeting.join_code == join_code, models.Meeting.status == "active").first()
+    
+    # 2. If not found, check if it's a scheduled meeting waiting to start
     if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+        scheduled = db.query(models.ScheduledMeeting).filter(models.ScheduledMeeting.join_code == join_code).first()
+        
+        if scheduled:
+            # Check if the joiner is the host (creator)
+            if scheduled.creator_id == user_id:
+                print(f"Host joining scheduled meeting {join_code}. Promoting to active meeting.")
+                # Auto-promote scheduled meeting to active meeting
+                meeting = models.Meeting(
+                    id=scheduled.id, # Keep the same ID
+                    title=scheduled.title,
+                    join_code=scheduled.join_code,
+                    creator_id=scheduled.creator_id,
+                    status="active",
+                    mode=scheduled.mode,
+                    started_at=datetime.now(timezone.utc)
+                )
+                db.add(meeting)
+                db.commit()
+                db.refresh(meeting)
+
+                # 1. Broadcast globally over Socket.io that this meeting went live
+                try:
+                    from main import sio
+                    await sio.emit("meeting_went_live", {
+                        "meeting_id": str(meeting.id),
+                        "join_code": meeting.join_code,
+                        "title": meeting.title
+                    })
+                    print(f"Broadcasted live status for meeting {meeting.id}")
+                except Exception as e:
+                    print(f"Failed to emit meeting_went_live socket event: {e}")
+
+                # 2. Dispatch high-priority email notification to participants
+                if scheduled.participants:
+                    # Query host name
+                    host_user = db.query(models.User).filter(models.User.id == user_id).first()
+                    host_name = host_user.name if host_user else "Host"
+                    frontend_url = os.getenv("FRONTEND_URL", "https://cadence-meeting-intelligence.vercel.app")
+                    
+                    invite_data = {
+                        "title": scheduled.title,
+                        "host_name": host_name,
+                        "join_code": scheduled.join_code,
+                        "join_url": frontend_url
+                    }
+                    
+                    for email in scheduled.participants:
+                        try:
+                            celery_client.send_task(
+                                "send_meeting_started_email",
+                                kwargs={
+                                    "to_email": email,
+                                    "invite_data": invite_data
+                                }
+                            )
+                            print(f"Queued meeting-start notification email to {email}")
+                        except Exception as e:
+                            print(f"Failed to dispatch meeting start email to {email}: {e}")
+            else:
+                # Attendee trying to join before host
+                raise HTTPException(
+                    status_code=status.HTTP_425_TOO_EARLY, 
+                    detail="Meeting has not started yet. Please wait for the host to join."
+                )
+        else:
+            # 3. Final Fallback: Check if it's a UUID (meeting_id) for backward compatibility
+            try:
+                meeting_uuid = UUID(join_code)
+                meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_uuid).first()
+            except ValueError:
+                pass
+            
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found or invalid join code")
+        
+    meeting_id = meeting.id
         
     if meeting.status != "active":
         raise HTTPException(status_code=400, detail="Cannot join an inactive meeting")
@@ -768,16 +1080,22 @@ def join_meeting(
     ).first()
     
     if participant:
+        participant.meeting_name = meeting.title
         return participant
-        
+
+    # Determine role
+    role = "host" if meeting.creator_id == user_id else "attendee"
+
     new_participant = models.MeetingParticipant(
         meeting_id=meeting_id,
         user_id=user_id,
-        display_name=participant_in.display_name
+        display_name=participant_in.display_name,
+        role=role
     )
     db.add(new_participant)
     db.commit()
     db.refresh(new_participant)
+    new_participant.meeting_name = meeting.title
     return new_participant
 
 @router.post("/{meeting_id}/leave", response_model=schemas.MeetingParticipant)
@@ -798,6 +1116,12 @@ def leave_meeting(
     participant.left_at = datetime.utcnow()
     db.commit()
     db.refresh(participant)
+    
+    # Populate meeting_name
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if meeting:
+        participant.meeting_name = meeting.title
+        
     return participant
 
 @router.post("/{meeting_id}/livekit-token")
@@ -830,35 +1154,3 @@ def create_livekit_token(
           "identity": identity,
           "display_name": display_name
       }
-
-@router.post("/scheduled", response_model=schemas.ScheduledMeetingOut, status_code=status.HTTP_201_CREATED)
-def schedule_meeting(
-    meeting_in: schemas.ScheduledMeetingCreate,
-    db: Session = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
-):
-    db_meeting = models.ScheduledMeeting(
-        creator_id=user_id,
-        title=meeting_in.title,
-        mode=meeting_in.mode,
-        scheduled_date=meeting_in.scheduled_date,
-        scheduled_start_time=meeting_in.scheduled_start_time,
-        expected_duration_min=meeting_in.expected_duration_min,
-        objectives=meeting_in.objectives,
-        participants=meeting_in.participants
-    )
-    db.add(db_meeting)
-    db.commit()
-    db.refresh(db_meeting)
-    
-    # TODO: Implement the logic to send an email with the meeting code to the participants.
-    
-    return db_meeting
-
-@router.get("/scheduled", response_model=List[schemas.ScheduledMeetingOut])
-def get_scheduled_meetings(
-    db: Session = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
-):
-    meetings = db.query(models.ScheduledMeeting).filter(models.ScheduledMeeting.creator_id == user_id).order_by(models.ScheduledMeeting.scheduled_date.asc(), models.ScheduledMeeting.scheduled_start_time.asc()).all()
-    return meetings

@@ -6,10 +6,19 @@ from core.database import Base
 
 from sqlalchemy.orm import relationship
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class Meeting(Base):
     __tablename__ = "meetings"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    join_code = Column(String, unique=True, index=True, nullable=True)
     title = Column(String, nullable=False)
     creator_id = Column(UUID(as_uuid=True), nullable=False)
     status = Column(String, default="active") # active, ended
@@ -104,6 +113,7 @@ class ScheduledMeeting(Base):
     __tablename__ = "scheduled_meetings"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    join_code = Column(String, unique=True, index=True, nullable=True)
     creator_id = Column(UUID(as_uuid=True), nullable=False)
     title = Column(String, nullable=False)
     mode = Column(String, default="general")

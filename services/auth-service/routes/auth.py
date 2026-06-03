@@ -102,6 +102,10 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 def get_user_by_id(user_id: str, db: Session = Depends(get_db)):
     return AuthService.get_user_by_id(db, user_id)
 
+@router.get("/users", response_model=list[schemas.UserPublic])
+def get_all_users(db: Session = Depends(get_db)):
+    return AuthService.get_all_users(db)
+
 @router.post("/users/batch", response_model=list[schemas.UserPublic])
 def get_users_by_ids(payload: schemas.UserIdsRequest, db: Session = Depends(get_db)):
     return AuthService.get_users_by_ids(db, [str(user_id) for user_id in payload.user_ids])

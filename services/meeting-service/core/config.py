@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     LIVEKIT_API_KEY: str = os.getenv("LIVEKIT_API_KEY", "")
     LIVEKIT_API_SECRET: str = os.getenv("LIVEKIT_API_SECRET", "")
     LIVEKIT_URL: str = os.getenv("LIVEKIT_URL", "")
-    AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8001")
+    GROQ_API: str = os.getenv("GROQ_API", "")
+    BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
+    FROM_EMAIL: str = os.getenv("FROM_EMAIL", "noreply@yourdomain.com")
+    PORT: str = os.getenv("PORT", "8002")
+
 
     class Config:
         case_sensitive = True

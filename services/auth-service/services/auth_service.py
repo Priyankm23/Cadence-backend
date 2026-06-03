@@ -31,6 +31,19 @@ class AuthService:
         db.add(new_user)
         db.commit()
         db.refresh(new_user)
+
+        # Sync to Meeting Service
+        try:
+            import httpx
+            meeting_service_url = "http://meeting-service:8002/meetings/internal/users/sync"
+            httpx.post(meeting_service_url, json={
+                "id": str(new_user.id),
+                "email": new_user.email,
+                "name": new_user.name
+            }, timeout=5.0)
+        except Exception as e:
+            print(f"Failed to sync user {new_user.id} to meeting service: {e}")
+
         return new_user
 
     @staticmethod
@@ -41,8 +54,7 @@ class AuthService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password"
             )
-        
-        access_token = create_access_token(subject=user.id, data={"name": user.name})
+        access_token = create_access_token(subject=user.id)
         refresh_token = create_refresh_token(subject=user.id)
         
         # Store refresh token hash in DB
@@ -84,7 +96,7 @@ class AuthService:
              raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
         # Generate new tokens
-        access_token = create_access_token(subject=user_id, data={"name": user.name})
+        access_token = create_access_token(subject=user_id)
         
         # Reuse original expiry for the rotated refresh token
         new_refresh_token = create_refresh_token(
@@ -124,3 +136,7 @@ class AuthService:
         if not user_ids:
             return []
         return db.query(models.User).filter(models.User.id.in_(user_ids)).all()
+
+    @staticmethod
+    def get_all_users(db: Session):
+        return db.query(models.User).all()

@@ -4,18 +4,20 @@ import time
 import redis
 import httpx
 from dotenv import load_dotenv
+from core.config import settings
 
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
-GROQ_API = os.getenv("GROQ_API")
+GROQ_API = settings.GROQ_API
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
 
 # Local loopback config inside container
-PORT = os.getenv("PORT", "8002")
+
+PORT = settings.PORT
 LOCAL_MEETING_SERVICE_URL = f"http://127.0.0.1:{PORT}"
 
 # Initialize Redis with resilient socket parameters
@@ -23,7 +25,8 @@ redis_client = redis.from_url(
     REDIS_URL,
     socket_connect_timeout=5,
     socket_keepalive=True,
-    retry_on_timeout=True
+    retry_on_timeout=True,
+    health_check_interval=10
 )
 
 # Initialize Celery client (to trigger notification-service)
@@ -183,13 +186,66 @@ Please return a JSON object with the following structure:
 
     # 4. Save Granular Data to Meeting Service
     
+    # Fetch participants to resolve assignee_ids
+    participants_map = {}
+    try:
+        p_res = call_meeting_service("GET", f"meetings/{meeting_id}/participants/all", timeout=5.0)
+        if p_res.status_code == 200:
+            for p in p_res.json():
+                name = p.get("user_name") or p.get("display_name")
+                if name:
+                    participants_map[name.lower()] = p.get("user_id")
+    except Exception as e:
+        print(f"[{meeting_id}] Warning: Could not fetch participants for assignee resolution: {e}")
+
     # Action Items
     for item in ai_output.get("action_items", []):
+        desc_raw = item.get("description", "")
+        if not desc_raw:
+            continue
+            
+        task = desc_raw
+        assignee_id = None
+        
+        # Try to parse "Task - Owner" format
+        if " - " in desc_raw:
+            parts = desc_raw.rsplit(" - ", 1)
+            task = parts[0].strip()
+            owner = parts[1].strip().lower()
+            
+            # Match owner name to a participant UUID
+            for p_name, p_id in participants_map.items():
+                if owner in p_name or p_name in owner:
+                    assignee_id = p_id
+                    break
+        elif " – " in desc_raw:
+            parts = desc_raw.rsplit(" – ", 1)
+            task = parts[0].strip()
+            owner = parts[1].strip().lower()
+            for p_name, p_id in participants_map.items():
+                if owner in p_name or p_name in owner:
+                    assignee_id = p_id
+                    break
+
+        # If we couldn't resolve the assignee, we just keep the raw description so frontend fallback works
+        # If we resolved it, we ideally save just the task, but saving the full desc ensures old frontend code still works perfectly
+        # until the frontend is updated to use the assignee_id. Let's save the task only if we found an assignee, 
+        # or actually let's save the full description to not break the frontend right now, but set the assignee_id.
+        # Actually, if we set the assignee_id, we can safely save just the task if we want, but since user said
+        # frontend splits by "-", let's keep the "-" in the description for now to not break the frontend immediately.
+
+        payload = {
+            "description": desc_raw,
+            "is_completed": False
+        }
+        if assignee_id:
+            payload["assignee_id"] = assignee_id
+
         try:
             call_meeting_service(
                 "POST",
                 f"meetings/{meeting_id}/action-items",
-                json={"description": item.get("description", ""), "is_completed": False},
+                json=payload,
                 timeout=5.0
             )
         except Exception as e:
@@ -225,26 +281,59 @@ Please return a JSON object with the following structure:
         if save_res.status_code == 200:
             print(f"[{meeting_id}] ANALYSIS SAVED SUCCESSFULLY.")
             
+            # Calculate duration
+            duration_seconds = meeting_data.get("duration_seconds")
+            duration_val = "N/A"
+            if duration_seconds is not None:
+                duration_val = str(max(1, round(duration_seconds / 60)))
+            
+            # Format date beautifully
+            created_at_str = meeting_data.get("created_at")
+            date_formatted = "Recent"
+            if created_at_str:
+                try:
+                    clean_dt_str = created_at_str.replace("Z", "+00:00")
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(clean_dt_str)
+                    date_formatted = dt.strftime("%B %d, %Y")
+                except Exception as e:
+                    print(f"[{meeting_id}] Warning formatting date: {e}")
+                    date_formatted = "Recent"
+
             # 6. Trigger Notifications
             report_data = {
                 "title": meeting_data.get("title", f"Meeting {str(meeting_id)[:8]}"),
                 "summary": ai_output.get("summary", ""),
                 "action_items": [item.get("description") for item in ai_output.get("action_items", [])],
-                "decisions": ai_output.get("decisions", [])
+                "decisions": ai_output.get("decisions", []),
+                "duration": duration_val,
+                "date": date_formatted
             }
             
             try:
-                celery_client.send_task(
-                    "send_meeting_summary_email",
-                    kwargs={
-                        "meeting_id": str(meeting_id),
-                        "to_email": "test@example.com",
-                        "report_data": report_data
-                    }
-                )
-                print(f"[{meeting_id}] Notification task dispatched.")
+                # Fetch all participants to get their emails
+                participants_res = call_meeting_service("GET", f"meetings/{meeting_id}/participants/all", timeout=5.0)
+                if participants_res.status_code == 200:
+                    participants = participants_res.json()
+                    for p in participants:
+                        email = p.get("email")
+                        if email:
+                            try:
+                                celery_client.send_task(
+                                    "send_meeting_summary_email",
+                                    kwargs={
+                                        "meeting_id": str(meeting_id),
+                                        "to_email": email,
+                                        "report_data": report_data
+                                    }
+                                )
+                                print(f"[{meeting_id}] Notification task dispatched to {email}.")
+                            except Exception as e:
+                                print(f"[{meeting_id}] Warning: Notification failed for {email}: {e}")
+                else:
+                    print(f"[{meeting_id}] Warning: Could not fetch participants for notifications.")
             except Exception as e:
-                print(f"[{meeting_id}] Warning: Notification failed: {e}")
+                print(f"[{meeting_id}] Warning: Notification fetching failed: {e}")
         else:
             print(f"[{meeting_id}] ERROR: Failed to save analysis {save_res.status_code}")
     except Exception as e:
@@ -351,6 +440,12 @@ def main():
                     user_id = payload.get("user_id")
                     if user_id:
                         generate_personal_analysis(meeting_id, user_id)
+        except redis.exceptions.TimeoutError:
+            # Ignore standard socket timeouts when the queue is idle
+            continue
+        except redis.exceptions.ConnectionError as e:
+            print(f"Queue connection error: {e}")
+            time.sleep(1)
         except Exception as e:
             print(f"Queue error: {e}")
             time.sleep(1)

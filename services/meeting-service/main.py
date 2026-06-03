@@ -19,11 +19,19 @@ import sys
 import os
 from contextlib import asynccontextmanager
 
-# Redis client
-redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
+# Redis client with resilient connection pool parameters
+redis_client = aioredis.from_url(
+    settings.REDIS_URL, 
+    decode_responses=False,
+    max_connections=1000,
+    socket_timeout=5.0,
+    socket_connect_timeout=5.0,
+    retry_on_timeout=True
+)
 
 async def redis_listener():
     while True:
+        pubsub = None
         try:
             pubsub = redis_client.pubsub()
             await pubsub.subscribe("transcript_updates")
@@ -42,9 +50,15 @@ async def redis_listener():
                         print(f"Error handling pubsub message: {e}")
         except ConnectionError as e:
             print(f"Redis pub/sub connection lost: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
         except Exception as e:
             print(f"Unexpected error in redis_listener: {e}. Reconnecting in 5 seconds...")
+        finally:
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe("transcript_updates")
+                    await pubsub.close()
+                except Exception as e:
+                    print(f"Error closing pubsub in listener: {e}")
             await asyncio.sleep(5)
 
 @asynccontextmanager
@@ -52,7 +66,7 @@ async def lifespan(app: FastAPI):
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
-    # Start both workers as subprocesses when app starts
+    # Start workers as subprocesses when app starts
     transcript_worker = subprocess.Popen(
         [sys.executable, "-u", os.path.join(BASE_DIR, "transcript_worker.py")],
         stdout=sys.stdout,
@@ -63,8 +77,14 @@ async def lifespan(app: FastAPI):
         stdout=sys.stdout,
         stderr=sys.stderr
     )
+    notification_worker = subprocess.Popen(
+        [sys.executable, "-m", "celery", "-A", "notification_worker", "worker", "--loglevel=info"],
+        stdout=sys.stdout,
+        stderr=sys.stderr
+    )
     print("Transcript worker started")
     print("AI worker started")
+    print("Notification worker started")
     
     listener_task = asyncio.create_task(redis_listener())
     print("Redis listener started")
@@ -75,6 +95,7 @@ async def lifespan(app: FastAPI):
     listener_task.cancel()
     transcript_worker.terminate()
     ai_worker.terminate()
+    notification_worker.terminate()
     print("Workers stopped")
 
 # Create Socket.io server
@@ -109,10 +130,24 @@ async def connect(sid, environ, auth=None):
     try:
         payload = decode_token(auth['token'])
         user_id = payload.get("sub")
-        user_name = payload.get("name", "Anonymous")
         
         if not user_id:
             return False
+            
+        # Fetch the latest user name from local DB
+        from core.database import SessionLocal
+        from uuid import UUID
+        user_name = "Anonymous"
+        
+        db = SessionLocal()
+        try:
+            user = db.query(models.User).filter(models.User.id == UUID(str(user_id))).first()
+            if user:
+                user_name = user.name
+        except Exception as e:
+            print(f"Error fetching user name for socket connection: {e}")
+        finally:
+            db.close()
             
         async with sio.session(sid) as session:
             session['user_id'] = user_id
@@ -235,6 +270,44 @@ async def handle_tab_switch_alert(sid, data):
             print(f"Error logging alert: {e}")
         finally:
             db.close()
+
+@sio.on("send_message")
+async def handle_send_message(sid, data):
+    async with sio.session(sid) as session:
+        session_user_id = session.get('user_id')
+        session_user_name = session.get('user_name', "Anonymous")
+
+    meeting_id = data.get("meeting_id")
+    if not meeting_id:
+        return
+
+    user_id = session_user_id or data.get("user_id")
+    user_name = session_user_name or data.get("user_name") or user_id
+    message = data.get("message", "").strip()
+
+    if message:
+        print(f"[chat] {user_name} in {meeting_id}: {message}")
+        await sio.emit("chat_message", {
+            "user_id": user_id,
+            "user_name": user_name,
+            "message": message,
+            "timestamp": time.time()
+        }, room=str(meeting_id))
+
+@sio.on("end_meeting_for_all")
+async def handle_end_meeting_for_all(sid, data):
+    async with sio.session(sid) as session:
+        session_user_id = session.get('user_id')
+        session_user_name = session.get('user_name', "Anonymous")
+        
+    meeting_id = data.get("meeting_id")
+    if meeting_id:
+        print(f"[meeting] Host {session_user_name} forcibly ended meeting {meeting_id}")
+        await sio.emit("meeting_force_ended", {
+            "message": "The host has ended this meeting for everyone.",
+            "timestamp": time.time()
+        }, room=str(meeting_id))
+
 
 # --- WebRTC Signaling ---
 # @sio.on("webrtc_offer")

@@ -1,5 +1,0 @@
-redis
-python-dotenv
-httpx
-numpy
-packaging

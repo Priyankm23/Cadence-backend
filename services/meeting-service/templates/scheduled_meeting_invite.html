@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting Invitation: {{ meeting_title }}</title>
+    <style>
+        /* Modern reset & typography */
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100% !important;
+            background-color: #f8fafc;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            color: #1e293b;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        table {
+            border-collapse: collapse;
+            mso-table-lspace: 0pt;
+            mso-table-rspace: 0pt;
+        }
+
+        img {
+            border: 0;
+            height: auto;
+            line-height: 100%;
+            outline: none;
+            text-decoration: none;
+        }
+
+        .email-container {
+            max-width: 600px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 77, 64, 0.04);
+            border: 1px solid rgba(226, 232, 240, 0.8);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #004d40 0%, #00796b 100%);
+            padding: 36px 40px;
+            color: #ffffff;
+            position: relative;
+        }
+
+        .meeting-title {
+            font-size: 26px;
+            font-weight: 700;
+            margin: 0;
+            line-height: 1.3;
+            letter-spacing: -0.02em;
+        }
+
+        .meta-row {
+            margin-top: 16px;
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.9);
+            font-weight: 500;
+        }
+
+        .content-body {
+            padding: 40px;
+        }
+
+        .section-card {
+            background-color: #ffffff;
+            border-radius: 12px;
+            border: 1px solid #f1f5f9;
+            padding: 24px;
+            margin-bottom: 28px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.01), 0 2px 4px -1px rgba(0, 0, 0, 0.01);
+            border-left: 4px solid #00796b;
+        }
+
+        .section-header {
+            margin-bottom: 18px;
+            border-bottom: 1px solid #f8fafc;
+            padding-bottom: 10px;
+            font-size: 18px;
+            font-weight: 650;
+            color: #0f172a;
+        }
+        
+        .info-row {
+            margin-bottom: 12px;
+            font-size: 15px;
+            color: #334155;
+            line-height: 1.6;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #0f172a;
+            display: inline-block;
+            width: 120px;
+        }
+
+        .btn-container {
+            text-align: center;
+            margin-top: 36px;
+            margin-bottom: 12px;
+        }
+
+        .cta-btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #00796b 0%, #004d40 100%);
+            background-color: #00796b;
+            color: #ffffff !important;
+            padding: 14px 36px;
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 77, 64, 0.15);
+        }
+
+        .footer {
+            background-color: #fafbfd;
+            padding: 32px 40px;
+            border-top: 1px solid #f1f5f9;
+            text-align: center;
+            font-size: 13px;
+            color: #64748b;
+            line-height: 1.6;
+        }
+        
+        .footer-brand {
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 6px;
+            letter-spacing: -0.01em;
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <!-- Header Section -->
+        <div class="header">
+            <img src="https://res.cloudinary.com/dv7iah7yv/image/upload/v1780324961/cadence_logo_1_anspsz.png" alt="Cadence AI Logo" style="height: 40px; margin-bottom: 16px; display: block;" />
+            <h1 class="meeting-title">You're Invited: {{ meeting_title }}</h1>
+        </div>
+
+        <!-- Body Content -->
+        <div class="content-body">
+            <div class="section-card">
+                <div class="section-header">
+                    Meeting Details
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Date:</span> {{ date }}
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Time:</span> {{ time }}
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Duration:</span> {{ duration }} mins
+                </div>
+                {% if objectives %}
+                <div class="info-row">
+                    <span class="info-label" style="display: block; margin-bottom: 8px;">Objectives:</span>
+                    <ul style="margin: 0; padding-left: 20px; color: #334155;">
+                        {% for objective in objectives %}
+                        <li style="margin-bottom: 4px;">{{ objective }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                <div class="info-row">
+                    <span class="info-label">Host:</span> {{ host_name }}
+                </div>
+                <div class="info-row" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed #e2e8f0;">
+                    <span class="info-label">Join Code:</span> 
+                    <span style="font-family: monospace; font-size: 18px; font-weight: 700; color: #00796b; background: #e0f2f1; padding: 4px 8px; border-radius: 6px; letter-spacing: 1px;">{{ join_code }}</span>
+                </div>
+            </div>
+
+            <div style="text-align: center; font-size: 15px; color: #334155; margin-top: 20px;">
+                You can join the meeting using the platform when it's time. 
+            </div>
+
+            <!-- CTA Button -->
+            <div class="btn-container">
+                <a href="{{ join_url }}" class="cta-btn">Join Meeting</a>    
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <div class="footer-brand">Cadence AI Platform</div>
+            <div>This is an automated invitation for a scheduled meeting on Cadence.</div> 
+        </div>
+    </div>
+</body>
+</html>

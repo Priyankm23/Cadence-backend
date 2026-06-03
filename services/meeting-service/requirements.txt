@@ -15,3 +15,4 @@ httpx
 celery==5.3.6
 numpy
 packaging
+Jinja2==3.1.3

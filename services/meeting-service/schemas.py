@@ -3,6 +3,22 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional
 
+class UserSync(BaseModel):
+    id: UUID
+    email: str
+    name: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+class UserOut(BaseModel):
+    id: UUID
+    email: str
+    name: str
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MeetingBase(BaseModel):
     title: str
 
@@ -11,6 +27,7 @@ class MeetingCreate(MeetingBase):
 
 class Meeting(MeetingBase):
     id: UUID
+    join_code: Optional[str] = None
     creator_id: UUID
     creator_name: Optional[str] = None
     status: Optional[str] = "active"
@@ -138,6 +155,7 @@ class MeetingParticipant(MeetingParticipantCreate):
     joined_at: Optional[datetime] = None
     left_at: Optional[datetime] = None
     speaking_time_seconds: Optional[int] = 0
+    meeting_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -160,8 +178,10 @@ class ScheduledMeetingCreate(BaseModel):
 
 class ScheduledMeetingOut(ScheduledMeetingCreate):
     id: UUID
+    join_code: Optional[str] = None
     creator_id: UUID
     created_at: Optional[datetime] = None
+    is_live: Optional[bool] = False
 
     model_config = ConfigDict(from_attributes=True)
 

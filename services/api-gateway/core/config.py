@@ -9,16 +9,15 @@ class Settings(BaseSettings):
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
     
     # Service URLs
-    AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL", "http://localhost:8001")
-    MEETING_SERVICE_URL: str = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
-    AI_SERVICE_URL: str = os.getenv("AI_SERVICE_URL", "http://ai-service:8004")
+    AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8001")
+    MEETING_SERVICE_URL: str = os.getenv("MEETING_SERVICE_URL", "http://meeting-service:8002")
     
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
     
     # CORS Configuration
     ALLOWED_ORIGINS_STR: str = os.getenv(
         "ALLOWED_ORIGINS",
-        "http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173"
+        "http://localhost:3000,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:5500"
     )
 
     @property
