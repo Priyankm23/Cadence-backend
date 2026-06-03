@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
         stderr=sys.stderr
     )
     notification_worker = subprocess.Popen(
-        [sys.executable, "-m", "celery", "-A", "notification_worker", "worker", "--loglevel=info"],
+        [sys.executable, "-m", "celery", "-A", "notification_worker", "worker", "--loglevel=info", "--pool=solo"],
         stdout=sys.stdout,
         stderr=sys.stderr
     )
