@@ -434,9 +434,11 @@ def main():
                 payload = json.loads(payload_str)
                 meeting_id = payload.get("meeting_id")
                 
-                if queue_name.decode() == "meeting_ended_queue" and meeting_id:
+                queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
+                
+                if queue_str == "meeting_ended_queue" and meeting_id:
                     generate_meeting_report(meeting_id)
-                elif queue_name.decode() == "personal_analysis_queue" and meeting_id:
+                elif queue_str == "personal_analysis_queue" and meeting_id:
                     user_id = payload.get("user_id")
                     if user_id:
                         generate_personal_analysis(meeting_id, user_id)

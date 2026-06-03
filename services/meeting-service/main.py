@@ -61,6 +61,19 @@ async def redis_listener():
                     print(f"Error closing pubsub in listener: {e}")
             await asyncio.sleep(5)
 
+async def monitor_workers(t_proc, a_proc, n_proc):
+    try:
+        while True:
+            await asyncio.sleep(10)
+            if t_proc.poll() is not None:
+                print(f"[Process Monitor] ERROR: transcript_worker terminated with exit code {t_proc.returncode}")
+            if a_proc.poll() is not None:
+                print(f"[Process Monitor] ERROR: ai_worker terminated with exit code {a_proc.returncode}")
+            if n_proc.poll() is not None:
+                print(f"[Process Monitor] ERROR: notification_worker terminated with exit code {n_proc.returncode}")
+    except asyncio.CancelledError:
+        pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     
@@ -89,9 +102,13 @@ async def lifespan(app: FastAPI):
     listener_task = asyncio.create_task(redis_listener())
     print("Redis listener started")
     
+    monitor_task = asyncio.create_task(monitor_workers(transcript_worker, ai_worker, notification_worker))
+    print("Subprocess monitor started")
+    
     yield  # app runs here
     
     # Cleanup when app shuts down
+    monitor_task.cancel()
     listener_task.cancel()
     transcript_worker.terminate()
     ai_worker.terminate()
