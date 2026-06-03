@@ -14,8 +14,21 @@ from livekit import api
 from core.security import decode_token
 import models, schemas
 
+import ssl
 from celery import Celery
-celery_client = Celery("meeting_service", broker=settings.REDIS_URL)
+
+redis_url = settings.REDIS_URL
+if redis_url.startswith("rediss://"):
+    if "ssl_cert_reqs" not in redis_url:
+        separator = "&" if "?" in redis_url else "?"
+        redis_url = f"{redis_url}{separator}ssl_cert_reqs=none"
+
+celery_client = Celery("meeting_service", broker=redis_url)
+
+if settings.REDIS_URL.startswith("rediss://"):
+    celery_client.conf.update(
+        broker_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+    )
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 

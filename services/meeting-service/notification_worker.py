@@ -5,12 +5,26 @@ from celery import Celery
 from jinja2 import Environment, FileSystemLoader
 from core.config import settings
 
+import ssl
+
 # Initialize Celery
+redis_url = settings.REDIS_URL
+if redis_url.startswith("rediss://"):
+    if "ssl_cert_reqs" not in redis_url:
+        separator = "&" if "?" in redis_url else "?"
+        redis_url = f"{redis_url}{separator}ssl_cert_reqs=none"
+
 celery_app = Celery(
     "notification_worker",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
+    broker=redis_url,
+    backend=redis_url
 )
+
+if settings.REDIS_URL.startswith("rediss://"):
+    celery_app.conf.update(
+        broker_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+        redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+    )
 
 # Setup Jinja2 templates
 template_dir = os.path.join(os.path.dirname(__file__), "templates")

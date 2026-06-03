@@ -29,9 +29,23 @@ redis_client = redis.from_url(
     health_check_interval=10
 )
 
+import ssl
+
 # Initialize Celery client (to trigger notification-service)
 from celery import Celery
-celery_client = Celery("ai_worker", broker=REDIS_URL)
+
+redis_url = REDIS_URL
+if redis_url.startswith("rediss://"):
+    if "ssl_cert_reqs" not in redis_url:
+        separator = "&" if "?" in redis_url else "?"
+        redis_url = f"{redis_url}{separator}ssl_cert_reqs=none"
+
+celery_client = Celery("ai_worker", broker=redis_url)
+
+if REDIS_URL.startswith("rediss://"):
+    celery_client.conf.update(
+        broker_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
+    )
 
 def call_meeting_service(method, path, **kwargs):
     """
