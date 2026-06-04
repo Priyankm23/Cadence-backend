@@ -15,7 +15,7 @@ redis_url = settings.REDIS_URL
 if redis_url.startswith("rediss://"):
     if "ssl_cert_reqs" not in redis_url:
         separator = "&" if "?" in redis_url else "?"
-        redis_url = f"{redis_url}{separator}ssl_cert_reqs=none"
+        redis_url = f"{redis_url}{separator}ssl_cert_reqs=CERT_NONE"
 
 celery_app = Celery(
     "notification_worker",
