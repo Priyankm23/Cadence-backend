@@ -51,11 +51,11 @@ The system utilizes a modern, resilient microservice pattern designed to keep co
                                                            │
                                                   Dispatches email task
                                                            │
-                                               ┌───────────▼───────────┐
-                                               │ Notification Worker   │
-                                               │ (Celery Daemon +      │
-                                               │ Brevo SMTP API Email) │
-                                               └───────────────────────┘
+                                                ┌───────────▼───────────┐
+                                                │ Notification Worker   │
+                                                │ (Celery Daemon +      │
+                                                │ Gmail OAuth2 API)     │
+                                                └───────────────────────┘
 ```
 
 ---
@@ -119,7 +119,7 @@ Triggered automatically when a meeting ends (monitoring the `meeting_ended_queue
 ### 3. Notification Worker (`services/meeting-service/notification_worker.py`)
 A background Celery worker that manages downstream notification tasks.
 * **SMTP Delivery:** Generates professional email reports using **Jinja2** HTML templates (`meeting_summary.html`, `scheduled_meeting_invite.html`, and `meeting_started_notification.html`).
-* **Brevo REST Client:** Sends transactional emails securely through the **Brevo (Sendinblue)** API using resilient HTTP calls.
+* **Gmail OAuth2 Client:** Sends transactional emails securely through the **Google Gmail API** using refreshed credentials and lightweight HTTP POST endpoints.
 
 ---
 
@@ -243,7 +243,7 @@ The database uses PostgreSQL (configured locally or via Neon Serverless Postgres
 [Notification Worker] (Celery consumer)
      │
      ├──► Renders Jinja2 HTML email templates
-     └──► Calls [Brevo API Client] (Sends email to participants)
+     └──► Calls [Gmail API Client] (Sends email to participants)
 ```
 
 ---
@@ -277,9 +277,11 @@ MEETING_SERVICE_URL=http://localhost:8002
 # Groq API for Whisper (Speech) and LLaMA 3 (Intelligence)
 GROQ_API=gsk_your_groq_api_credential_key
 
-# Brevo SMTP API (Used by Notification Worker)
-BREVO_API_KEY=xkeysib-your-brevo-api-key
-FROM_EMAIL=your-verified-sender@domain.com
+# Gmail API OAuth2 (Used by Notification Worker)
+GMAIL_CLIENT_ID=your-google-oauth2-client-id
+GMAIL_CLIENT_SECRET=your-google-oauth2-client-secret
+GMAIL_REFRESH_TOKEN=your-google-oauth2-refresh-token
+FROM_EMAIL=your-gmail-address@gmail.com
 
 # LiveKit WebRTC Configuration (Used for Webhook WebRTC rooms verification)
 LIVEKIT_URL=wss://your-project.livekit.cloud
