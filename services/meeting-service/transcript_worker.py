@@ -4,6 +4,7 @@ import base64
 import time
 import uuid
 import wave
+import socket
 import io
 import redis
 import httpx
@@ -47,8 +48,12 @@ redis_client = redis.from_url(
     REDIS_URL,
     socket_connect_timeout=5,
     socket_keepalive=True,
-    retry_on_timeout=True,
-    health_check_interval=10
+    socket_keepalive_options={
+        socket.TCP_KEEPIDLE: 60,    # start keepalives after 60s idle
+        socket.TCP_KEEPINTVL: 10,   # probe every 10s
+        socket.TCP_KEEPCNT: 3,      # drop after 3 failed probes
+    },
+    retry_on_timeout=True
 )
 
 def call_meeting_service(method, path, **kwargs):

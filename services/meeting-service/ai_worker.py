@@ -1,23 +1,23 @@
 import os
 import json
 import time
+import socket
 import redis
 import httpx
 from dotenv import load_dotenv
-from core.config import settings
 
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
-GROQ_API = settings.GROQ_API
+GROQ_API = os.getenv("GROQ_API","")
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
 
 # Local loopback config inside container
 
-PORT = settings.PORT
+PORT = os.getenv("PORT","8002")
 LOCAL_MEETING_SERVICE_URL = f"http://127.0.0.1:{PORT}"
 
 # Initialize Redis with resilient socket parameters
@@ -25,8 +25,12 @@ redis_client = redis.from_url(
     REDIS_URL,
     socket_connect_timeout=5,
     socket_keepalive=True,
-    retry_on_timeout=True,
-    health_check_interval=10
+    socket_keepalive_options={
+        socket.TCP_KEEPIDLE: 60,    # start keepalives after 60s idle
+        socket.TCP_KEEPINTVL: 10,   # probe every 10s
+        socket.TCP_KEEPCNT: 3,      # drop after 3 failed probes
+    },
+    retry_on_timeout=True
 )
 
 import ssl
