@@ -59,26 +59,28 @@ redis_client = redis.from_url(
 
 def call_meeting_service(method, path, **kwargs):
     """
-    Robust internal HTTP helper that calls MEETING_SERVICE_URL first, 
-    and automatically falls back to LOCAL_MEETING_SERVICE_URL (127.0.0.1) 
-    if the configured service URL fails (e.g. Hairpin NAT / loopback blocks).
+    Robust internal HTTP helper. 
+    Since workers run in the same container as the meeting service, we try the 
+    local loopback URL (127.0.0.1:{PORT}) first for maximum speed and reliability,
+    and fall back to the configured MEETING_SERVICE_URL if the local call fails.
     """
-    url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
-    try:
-        response = httpx.request(method, url, **kwargs)
-        if response.status_code < 500:
-            return response
-        print(f"[{method}] {url} returned HTTP {response.status_code}. Trying local fallback...")
-    except Exception as e:
-        print(f"[{method}] {url} failed: {e}. Trying local fallback...")
-        
     local_url = f"{LOCAL_MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
-        print(f"[{method}] Falling back to local URL: {local_url}")
-        return httpx.request(method, local_url, **kwargs)
+        response = httpx.request(method, local_url, **kwargs)
+        if response.status_code < 500:
+            return response
+        print(f"[{method}] {local_url} returned HTTP {response.status_code}. Trying external fallback...")
+    except Exception as e:
+        print(f"[{method}] {local_url} failed: {e}. Trying external fallback...")
+        
+    url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        print(f"[{method}] Falling back to external URL: {url}")
+        return httpx.request(method, url, **kwargs)
     except Exception as fallback_e:
-        print(f"[{method}] Local fallback to {local_url} also failed: {fallback_e}")
+        print(f"[{method}] External fallback to {url} also failed: {fallback_e}")
         raise fallback_e
+
 
 meeting_buffers = {}
 executor = ThreadPoolExecutor(max_workers=10)
