@@ -25,6 +25,11 @@ if redis_url.startswith("rediss://"):
 
 celery_client = Celery("meeting_service", broker=redis_url)
 
+if settings.REDIS_QUEUE_PREFIX:
+    celery_client.conf.update(
+        task_default_queue=f"{settings.REDIS_QUEUE_PREFIX}celery",
+    )
+
 if settings.REDIS_URL.startswith("rediss://"):
     celery_client.conf.update(
         broker_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
@@ -342,7 +347,7 @@ async def livekit_webhook(request: Request, db: Session = Depends(get_db)):
 
                 from main import redis_client
                 import json
-                await redis_client.rpush("meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
+                await redis_client.rpush(f"{settings.REDIS_QUEUE_PREFIX}meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
                 print(f"[Webhook] Triggered AI generation for meeting {meeting_id}.")
         except Exception as e:
             print(f"[Webhook] Error processing room_finished for {room_name}: {e}")
@@ -441,7 +446,7 @@ async def end_meeting(
     # Notify AI service to generate report
     from main import redis_client
     import json
-    await redis_client.rpush("meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
+    await redis_client.rpush(f"{settings.REDIS_QUEUE_PREFIX}meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
     
     return meeting
 
@@ -606,7 +611,7 @@ async def trigger_personal_analysis(
 
     from main import redis_client
     import json
-    await redis_client.rpush("personal_analysis_queue", json.dumps({
+    await redis_client.rpush(f"{settings.REDIS_QUEUE_PREFIX}personal_analysis_queue", json.dumps({
         "meeting_id": str(meeting_id),
         "user_id": str(user_id)
     }))
@@ -790,7 +795,7 @@ async def trigger_analysis(
     # 4. Analysis is missing — push to the Redis queue so the AI worker generates it
     from main import redis_client
     import json
-    await redis_client.rpush("meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
+    await redis_client.rpush(f"{settings.REDIS_QUEUE_PREFIX}meeting_ended_queue", json.dumps({"meeting_id": str(meeting_id)}))
 
     return {
         "status": "triggered",

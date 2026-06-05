@@ -29,6 +29,11 @@ if settings.REDIS_URL.startswith("rediss://"):
         redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_NONE},
     )
 
+if settings.REDIS_QUEUE_PREFIX:
+    celery_app.conf.update(
+        task_default_queue=f"{settings.REDIS_QUEUE_PREFIX}celery",
+    )
+
 # Setup Jinja2 templates
 template_dir = os.path.join(os.path.dirname(__file__), "templates")
 jinja_env = Environment(loader=FileSystemLoader(template_dir))

@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API")
 
@@ -356,7 +357,7 @@ def _flush_buffer(buffer_state):
         print(f"HTTP error connecting to meeting-service: {e}")
 
     # Publish to Redis for live frontend updates
-    redis_client.publish("transcript_updates", json.dumps({
+    redis_client.publish(f"{REDIS_QUEUE_PREFIX}transcript_updates", json.dumps({
         "meeting_id": meeting_id,
         "user_name": user_name,
         "text": text,
@@ -366,12 +367,12 @@ def _flush_buffer(buffer_state):
 def main():
     print(f"Transcript Worker started. Connecting to meeting service at {MEETING_SERVICE_URL}")
     # Clear stale audio from previous runs
-    redis_client.delete("audio_queue")
+    redis_client.delete(f"{REDIS_QUEUE_PREFIX}audio_queue")
     print("Cleared stale audio chunks from queue.")
 
     while True:
         try:
-            result = redis_client.blpop("audio_queue", timeout=30)
+            result = redis_client.blpop(f"{REDIS_QUEUE_PREFIX}audio_queue", timeout=30)
             if result:
                 _, payload_str = result
                 process_audio_chunk(payload_str)

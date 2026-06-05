@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API","")
 
@@ -45,6 +46,11 @@ if redis_url.startswith("rediss://"):
         redis_url = f"{redis_url}{separator}ssl_cert_reqs=CERT_NONE"
 
 celery_client = Celery("ai_worker", broker=redis_url)
+
+if REDIS_QUEUE_PREFIX:
+    celery_client.conf.update(
+        task_default_queue=f"{REDIS_QUEUE_PREFIX}celery",
+    )
 
 if REDIS_URL.startswith("rediss://"):
     celery_client.conf.update(
@@ -446,7 +452,10 @@ def main():
     
     while True:
         try:
-            result = redis_client.blpop(["meeting_ended_queue", "personal_analysis_queue"], timeout=30)
+            result = redis_client.blpop([
+                f"{REDIS_QUEUE_PREFIX}meeting_ended_queue",
+                f"{REDIS_QUEUE_PREFIX}personal_analysis_queue"
+            ], timeout=30)
             if result:
                 queue_name, payload_str = result
                 payload = json.loads(payload_str)
@@ -454,9 +463,9 @@ def main():
                 
                 queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
                 
-                if queue_str == "meeting_ended_queue" and meeting_id:
+                if queue_str == f"{REDIS_QUEUE_PREFIX}meeting_ended_queue" and meeting_id:
                     generate_meeting_report(meeting_id)
-                elif queue_str == "personal_analysis_queue" and meeting_id:
+                elif queue_str == f"{REDIS_QUEUE_PREFIX}personal_analysis_queue" and meeting_id:
                     user_id = payload.get("user_id")
                     if user_id:
                         generate_personal_analysis(meeting_id, user_id)

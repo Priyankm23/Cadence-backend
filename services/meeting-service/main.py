@@ -34,7 +34,7 @@ async def redis_listener():
         pubsub = None
         try:
             pubsub = redis_client.pubsub()
-            await pubsub.subscribe("transcript_updates")
+            await pubsub.subscribe(f"{settings.REDIS_QUEUE_PREFIX}transcript_updates")
             print("Subscribed to transcript_updates Redis channel")
             async for message in pubsub.listen():
                 if message["type"] == "message":
@@ -248,7 +248,7 @@ async def handle_audio_chunk(sid, data):
         "chunk_end_ms": chunk_end_ms,
         "audio": audio_b64
     }
-    await redis_client.rpush("audio_queue", json.dumps(payload))
+    await redis_client.rpush(f"{settings.REDIS_QUEUE_PREFIX}audio_queue", json.dumps(payload))
     print(f"[audio_chunk] Queued chunk for {user_name} in meeting {meeting_id}, "
           f"audio_size={len(audio_b64)} bytes")
 

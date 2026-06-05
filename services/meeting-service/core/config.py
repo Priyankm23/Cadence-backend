@@ -7,6 +7,7 @@ load_dotenv()
 class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL")
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
+    REDIS_QUEUE_PREFIX: str = os.getenv("REDIS_QUEUE_PREFIX", "")
     SECRET_KEY: str = os.getenv("SECRET_KEY", "dev-secret-key")
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
     LIVEKIT_API_KEY: str = os.getenv("LIVEKIT_API_KEY", "")
