@@ -14,9 +14,20 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
 
+class UserProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
+    meeting_name: Optional[str] = None
+
 class UserOut(UserBase):
     id: UUID4
     is_active: bool
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
+    meeting_name: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -26,6 +37,10 @@ class UserPublic(BaseModel):
     id: UUID4
     name: str
     email: EmailStr
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
+    meeting_name: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -63,12 +63,12 @@ def get_gmail_access_token():
         print(f"[Email] Exception during token refresh: {e}")
         return None
 
-def send_email_gmail(to_email: str, subject: str, html_content: str):
+def send_email_gmail(to_email: str, subject: str, html_content: str) -> bool:
     """Sends email using Gmail REST API. Works on both local and Render."""
     access_token = get_gmail_access_token()
     if not access_token:
         print("[Email] Error: Unable to retrieve Gmail access token. Skipping send.")
-        return
+        return False
 
     # Construct MIME Message
     try:
@@ -84,7 +84,7 @@ def send_email_gmail(to_email: str, subject: str, html_content: str):
         encoded_message = base64.urlsafe_b64encode(raw_bytes).decode('utf-8')
     except Exception as e:
         print(f"[Email] Failed to construct MIME message: {e}")
-        return
+        return False
 
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     headers = {
@@ -99,10 +99,13 @@ def send_email_gmail(to_email: str, subject: str, html_content: str):
         response = httpx.post(url, json=payload, headers=headers, timeout=15.0)
         if response.status_code == 200:
             print(f"[Email] Sent successfully to {to_email} via Gmail API. Msg ID: {response.json().get('id')}")
+            return True
         else:
             print(f"[Email] Gmail API Error ({response.status_code}): {response.text}")
+            return False
     except Exception as e:
         print(f"[Email] Failed to send email via Gmail API: {e}")
+        return False
 
 @celery_app.task(name="send_meeting_summary_email")
 def send_meeting_summary_email(meeting_id: str, to_email: str, report_data: dict):
@@ -156,7 +159,9 @@ def send_meeting_summary_email(meeting_id: str, to_email: str, report_data: dict
     subject = f"AI Summary: {report_data.get('title', 'Your Recent Meeting')}"
     
     # Use the unified API method for both dev and prod
-    send_email_gmail(to_email, subject, html_content)
+    success = send_email_gmail(to_email, subject, html_content)
+    if not success:
+        raise RuntimeError(f"Failed to send summary email to {to_email}")
         
     return {"status": "success", "meeting_id": meeting_id, "to": to_email}
 
@@ -186,7 +191,9 @@ def send_scheduled_meeting_invite_email(to_email: str, invite_data: dict):
     )
     
     subject = f"Invitation: {invite_data.get('title', 'Scheduled Meeting')}"
-    send_email_gmail(to_email, subject, html_content)
+    success = send_email_gmail(to_email, subject, html_content)
+    if not success:
+        raise RuntimeError(f"Failed to send invitation email to {to_email}")
     
     return {"status": "success", "to": to_email}
 
@@ -202,6 +209,8 @@ def send_meeting_started_email(to_email: str, invite_data: dict):
     )
     
     subject = f"Live Now: {invite_data.get('title', 'Your Scheduled Meeting has Started')}"
-    send_email_gmail(to_email, subject, html_content)
+    success = send_email_gmail(to_email, subject, html_content)
+    if not success:
+        raise RuntimeError(f"Failed to send meeting started notification email to {to_email}")
     
     return {"status": "success", "to": to_email}

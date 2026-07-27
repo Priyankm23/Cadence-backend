@@ -14,6 +14,23 @@ from core.config import settings
 
 class AuthService:
     @staticmethod
+    def sync_user_to_meeting_service(user: models.User):
+        try:
+            import httpx
+            meeting_service_url = "http://meeting-service:8002/meetings/internal/users/sync"
+            httpx.post(meeting_service_url, json={
+                "id": str(user.id),
+                "email": user.email,
+                "name": user.name,
+                "company_name": user.company_name,
+                "role": user.role,
+                "photo_url": user.photo_url,
+                "meeting_name": user.meeting_name
+            }, timeout=5.0)
+        except Exception as e:
+            print(f"Failed to sync user {user.id} to meeting service: {e}")
+
+    @staticmethod
     def register_user(db: Session, user_in: schemas.UserCreate):
         user = db.query(models.User).filter(models.User.email == user_in.email).first()
         if user:
@@ -33,18 +50,36 @@ class AuthService:
         db.refresh(new_user)
 
         # Sync to Meeting Service
-        try:
-            import httpx
-            meeting_service_url = "http://meeting-service:8002/meetings/internal/users/sync"
-            httpx.post(meeting_service_url, json={
-                "id": str(new_user.id),
-                "email": new_user.email,
-                "name": new_user.name
-            }, timeout=5.0)
-        except Exception as e:
-            print(f"Failed to sync user {new_user.id} to meeting service: {e}")
+        AuthService.sync_user_to_meeting_service(new_user)
 
         return new_user
+
+    @staticmethod
+    def update_user_profile(db: Session, user_id: str, profile_data: schemas.UserProfileUpdate):
+        user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Update fields if provided
+        if profile_data.name is not None:
+            user.name = profile_data.name
+        if profile_data.company_name is not None:
+            user.company_name = profile_data.company_name
+        if profile_data.role is not None:
+            user.role = profile_data.role
+        if profile_data.photo_url is not None:
+            user.photo_url = profile_data.photo_url
+        if profile_data.meeting_name is not None:
+            user.meeting_name = profile_data.meeting_name
+            
+        db.commit()
+        db.refresh(user)
+        
+        # Sync to Meeting Service
+        AuthService.sync_user_to_meeting_service(user)
+        
+        return user
+
 
     @staticmethod
     def authenticate_user(db: Session, login_data: schemas.LoginRequest):

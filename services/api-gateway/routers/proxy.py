@@ -55,10 +55,10 @@ async def proxy_request(request: Request, target_url: str):
                 content={"detail": f"Error connecting to downstream service: {str(exc)}"}
             )
 
-@router.api_route("/auth/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@router.api_route("/auth/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_auth(request: Request, path: str):
     return await proxy_request(request, settings.AUTH_SERVICE_URL)
 
-@router.api_route("/meetings/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@router.api_route("/meetings/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_meetings(request: Request, path: str):
     return await proxy_request(request, settings.MEETING_SERVICE_URL)

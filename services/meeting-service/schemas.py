@@ -7,6 +7,10 @@ class UserSync(BaseModel):
     id: UUID
     email: str
     name: str
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
+    meeting_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -14,9 +18,14 @@ class UserOut(BaseModel):
     id: UUID
     email: str
     name: str
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
+    meeting_name: Optional[str] = None
     created_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 class MeetingBase(BaseModel):
@@ -144,6 +153,7 @@ class MeetingAnalysis(MeetingAnalysisCreate):
 
 class MeetingParticipantCreate(BaseModel):
     display_name: Optional[str] = None
+    share_company_details: Optional[bool] = True
 
 class MeetingParticipant(MeetingParticipantCreate):
     id: UUID
@@ -156,8 +166,18 @@ class MeetingParticipant(MeetingParticipantCreate):
     left_at: Optional[datetime] = None
     speaking_time_seconds: Optional[int] = 0
     meeting_name: Optional[str] = None
+    receive_report: bool = True
+    share_company_details: bool = True
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    photo_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ParticipantReportSettingsUpdate(BaseModel):
+    receive_report: bool
+
 
 class MeetingActionItems(BaseModel):
     meeting_id: UUID

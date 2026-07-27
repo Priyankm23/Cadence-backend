@@ -12,7 +12,12 @@ class User(Base):
     name = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
+    company_name = Column(String, nullable=True)
+    role = Column(String, nullable=True)
+    photo_url = Column(String, nullable=True)
+    meeting_name = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"

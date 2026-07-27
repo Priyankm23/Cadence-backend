@@ -12,6 +12,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API","")
+AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
@@ -61,24 +62,42 @@ def call_meeting_service(method, path, **kwargs):
     """
     Robust internal HTTP helper. 
     Since workers run in the same container as the meeting service, we try the 
-    local loopback URL (127.0.0.1:{PORT}) first for maximum speed and reliability,
-    and fall back to the configured MEETING_SERVICE_URL if the local call fails.
+    local loopback URL (127.0.0.1:{PORT} or localhost:{PORT}) first for maximum speed 
+    and reliability, and fall back to the configured MEETING_SERVICE_URL if the local call fails.
     """
+    import traceback
+
+    # 1. Try 127.0.0.1 loopback URL
     local_url = f"{LOCAL_MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
-        response = httpx.request(method, local_url, **kwargs)
+        # Use trust_env=False to bypass any proxy configurations in the container
+        response = httpx.request(method, local_url, trust_env=False, **kwargs)
         if response.status_code < 500:
             return response
-        print(f"[{method}] {local_url} returned HTTP {response.status_code}. Trying external fallback...")
+        print(f"[{method}] {local_url} returned HTTP {response.status_code}. Trying local 'localhost' fallback...")
     except Exception as e:
-        print(f"[{method}] {local_url} failed: {e}. Trying external fallback...")
+        print(f"[{method}] {local_url} failed: {e}. Trying local 'localhost' fallback...")
+        traceback.print_exc()
+
+    # 2. Try localhost loopback URL
+    localhost_url = f"http://localhost:{PORT}/{path.lstrip('/')}"
+    try:
+        response = httpx.request(method, localhost_url, trust_env=False, **kwargs)
+        if response.status_code < 500:
+            return response
+        print(f"[{method}] {localhost_url} returned HTTP {response.status_code}. Trying external fallback...")
+    except Exception as e:
+        print(f"[{method}] {localhost_url} failed: {e}. Trying external fallback...")
+        traceback.print_exc()
         
+    # 3. Fall back to external MEETING_SERVICE_URL
     url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
         print(f"[{method}] Falling back to external URL: {url}")
         return httpx.request(method, url, **kwargs)
     except Exception as fallback_e:
         print(f"[{method}] External fallback to {url} also failed: {fallback_e}")
+        traceback.print_exc()
         raise fallback_e
 
 
@@ -129,7 +148,22 @@ def generate_meeting_report(meeting_id):
     formatted_transcript = ""
     for t in transcripts:
         user_name = t.get("user_name") or t.get("user_id", "Unknown")
-        formatted_transcript += f"{user_name}: {t.get('text', '')}\n"
+        
+        # Format start_time (stored in milliseconds) to human-readable time [MM:SS] or [HH:MM:SS]
+        start_ms = t.get("start_time")
+        time_str = ""
+        if start_ms is not None:
+            total_seconds = int(start_ms) // 1000
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            if minutes >= 60:
+                hours = minutes // 60
+                minutes = minutes % 60
+                time_str = f"[{hours:02d}:{minutes:02d}:{seconds:02d}] "
+            else:
+                time_str = f"[{minutes:02d}:{seconds:02d}] "
+                
+        formatted_transcript += f"{time_str}{user_name}: {t.get('text', '')}\n"
 
     # 3. Construct Mode-Aware Prompt
     mode_instructions = ""
@@ -154,7 +188,7 @@ def generate_meeting_report(meeting_id):
 
     system_prompt = f"""You are a Senior Meeting Intelligence Specialist. 
 Analyze the transcript of a {mode} meeting and extract key information.
-Be objective, professional, and concise.
+Be objective, professional, and detailed. Your goal is to provide a comprehensive, high-value report that helps users who missed the meeting or had connection issues quickly catch up on what was discussed, what questions were resolved, and what decisions were made. Do not include individual ratings or arbitrary scores.
 """
 
     user_prompt = f"""Transcript:
@@ -164,10 +198,28 @@ Be objective, professional, and concise.
 
 Please return a JSON object with the following structure:
 {{
-  "summary": "3-5 sentence executive summary.",
+  "summary": "A detailed 1-2 paragraph executive summary covering the overall meeting flow, main objectives, key discussion points, and final outcomes.",
   "sentiment": "Positive, Neutral, or Negative",
+  "topic_timeline": [
+    {{
+      "topic": "Name of the topic/agenda item (e.g., 'Salary Negotiation' or 'Architecture Review')",
+      "time_bracket": "Estimate the start and end timestamps in transcript (e.g., '11:18 - 13:05' or '00:00 - 05:20')",
+      "summary": "A detailed multi-sentence description of the discussion, including key arguments, conflicting viewpoints, and resolutions.",
+      "key_takeaways": [
+         "Specific key detail or argument 1", 
+         "Specific key detail or argument 2"
+      ]
+    }}
+  ],
+  "resolved_qna": [
+    {{
+      "question": "Important question asked during the meeting",
+      "asked_by": "Name of the person who asked the question",
+      "answer": "The answer or consensus reached, or 'Unresolved' if not answered"
+    }}
+  ],
   "action_items": [
-    {{ "description": "Clear, actionable task (include assignee if known, e.g., 'Update docs - John')" }}
+    {{ "description": "Clear, actionable task (include assignee if known, e.g., 'Notify Priyanshu of the final decision - Priyansh')" }}
   ],
   "decisions": ["Decision 1", "Decision 2"],
   "insights": {{ ... mode specific details ... }}
@@ -182,7 +234,7 @@ Please return a JSON object with the following structure:
     }
     
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": AI_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -291,11 +343,19 @@ Please return a JSON object with the following structure:
 
     # 5. Save final Analysis
     try:
+        insights_data = ai_output.get("insights", {})
+        if not isinstance(insights_data, dict):
+            insights_data = {}
+        if "topic_timeline" in ai_output:
+            insights_data["topic_timeline"] = ai_output["topic_timeline"]
+        if "resolved_qna" in ai_output:
+            insights_data["resolved_qna"] = ai_output["resolved_qna"]
+
         save_payload = {
             "summary": ai_output.get("summary", ""),
             "sentiment": ai_output.get("sentiment", "Neutral"),
             "mode": mode,
-            "insights": ai_output.get("insights", {})
+            "insights": insights_data
         }
         
         save_res = call_meeting_service(
@@ -342,20 +402,24 @@ Please return a JSON object with the following structure:
                 if participants_res.status_code == 200:
                     participants = participants_res.json()
                     for p in participants:
-                        email = p.get("email")
-                        if email:
-                            try:
-                                celery_client.send_task(
-                                    "send_meeting_summary_email",
-                                    kwargs={
-                                        "meeting_id": str(meeting_id),
-                                        "to_email": email,
-                                        "report_data": report_data
-                                    }
-                                )
-                                print(f"[{meeting_id}] Notification task dispatched to {email}.")
-                            except Exception as e:
-                                print(f"[{meeting_id}] Warning: Notification failed for {email}: {e}")
+                        if p.get("receive_report", True):
+                            email = p.get("email")
+                            if email:
+                                try:
+                                    celery_client.send_task(
+                                        "send_meeting_summary_email",
+                                        kwargs={
+                                            "meeting_id": str(meeting_id),
+                                            "to_email": email,
+                                            "report_data": report_data
+                                        }
+                                    )
+                                    print(f"[{meeting_id}] Notification task dispatched to {email}.")
+                                except Exception as e:
+                                    print(f"[{meeting_id}] Warning: Notification failed for {email}: {e}")
+                        else:
+                            print(f"[{meeting_id}] Skipping summary email for {p.get('email') or p.get('user_id')} per report settings.")
+
                 else:
                     print(f"[{meeting_id}] Warning: Could not fetch participants for notifications.")
             except Exception as e:
@@ -385,7 +449,22 @@ def generate_personal_analysis(meeting_id, user_id):
     formatted_transcript = ""
     for t in transcripts:
         user_name = t.get("user_name") or t.get("user_id", "Unknown")
-        formatted_transcript += f"{user_name}: {t.get('text', '')}\n"
+        
+        # Format start_time (stored in milliseconds) to human-readable time [MM:SS] or [HH:MM:SS]
+        start_ms = t.get("start_time")
+        time_str = ""
+        if start_ms is not None:
+            total_seconds = int(start_ms) // 1000
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            if minutes >= 60:
+                hours = minutes // 60
+                minutes = minutes % 60
+                time_str = f"[{hours:02d}:{minutes:02d}:{seconds:02d}] "
+            else:
+                time_str = f"[{minutes:02d}:{seconds:02d}] "
+                
+        formatted_transcript += f"{time_str}{user_name}: {t.get('text', '')}\n"
 
     system_prompt = "You are a highly skilled Speech and Communication Coach. Analyze the user's transcript from a meeting."
     user_prompt = f"""Transcript:
@@ -407,7 +486,7 @@ Please analyze this individual's performance and return a JSON object with the f
     }
     
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": AI_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -450,6 +529,15 @@ Please analyze this individual's performance and return a JSON object with the f
 
 
 def main():
+    print("--------------------------------------------------")
+    print(f"AI Service Worker starting...")
+    print(f"PORT environment variable: {PORT}")
+    print(f"LOCAL_MEETING_SERVICE_URL: {LOCAL_MEETING_SERVICE_URL}")
+    print(f"MEETING_SERVICE_URL: {MEETING_SERVICE_URL}")
+    print(f"REDIS_URL: {REDIS_URL}")
+    print(f"REDIS_QUEUE_PREFIX: {REDIS_QUEUE_PREFIX}")
+    print(f"AI_MODEL: {AI_MODEL}")
+    print("--------------------------------------------------")
     print(f"AI Service Worker started. Listening to queues...")
     
     while True:

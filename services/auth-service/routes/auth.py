@@ -98,6 +98,21 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 def get_me(current_user: models.User = Depends(get_current_user)):
     return current_user
 
+@router.get("/profile", response_model=schemas.UserOut)
+def get_profile(current_user: models.User = Depends(get_current_user)):
+    """Fetch current user's profile details."""
+    return current_user
+
+@router.put("/profile", response_model=schemas.UserOut)
+def update_profile(
+    profile_data: schemas.UserProfileUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's profile and sync to meeting-service."""
+    return AuthService.update_user_profile(db, str(current_user.id), profile_data)
+
+
 @router.get("/users/{user_id}", response_model=schemas.UserPublic)
 def get_user_by_id(user_id: str, db: Session = Depends(get_db)):
     return AuthService.get_user_by_id(db, user_id)

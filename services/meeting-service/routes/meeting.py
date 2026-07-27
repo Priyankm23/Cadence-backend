@@ -298,16 +298,25 @@ def sync_user(
     if db_user:
         db_user.email = user_in.email
         db_user.name = user_in.name
+        db_user.company_name = user_in.company_name
+        db_user.role = user_in.role
+        db_user.photo_url = user_in.photo_url
+        db_user.meeting_name = user_in.meeting_name
     else:
         db_user = models.User(
             id=user_in.id,
             email=user_in.email,
-            name=user_in.name
+            name=user_in.name,
+            company_name=user_in.company_name,
+            role=user_in.role,
+            photo_url=user_in.photo_url,
+            meeting_name=user_in.meeting_name
         )
         db.add(db_user)
     
     db.commit()
     return {"status": "success"}
+
 
 @router.post("/webhook")
 async def livekit_webhook(request: Request, db: Session = Depends(get_db)):
@@ -945,9 +954,19 @@ def list_participants(
         if user_data:
             participant.user_name = user_data.name
             participant.email = user_data.email
+            if participant.share_company_details:
+                participant.company_name = user_data.company_name
+                participant.role = user_data.role
+            else:
+                participant.company_name = None
+                participant.role = None
+            participant.photo_url = user_data.photo_url
         else:
             participant.user_name = None
             participant.email = None
+            participant.company_name = None
+            participant.role = None
+            participant.photo_url = None
 
     return participants
 
@@ -987,9 +1006,19 @@ def list_all_participants(
         if user_data:
             participant.user_name = user_data.name
             participant.email = user_data.email
+            if participant.share_company_details:
+                participant.company_name = user_data.company_name
+                participant.role = user_data.role
+            else:
+                participant.company_name = None
+                participant.role = None
+            participant.photo_url = user_data.photo_url
         else:
             participant.user_name = None
             participant.email = None
+            participant.company_name = None
+            participant.role = None
+            participant.photo_url = None
 
     return participants
 
@@ -1104,11 +1133,22 @@ async def join_meeting(
     # Determine role
     role = "host" if meeting.creator_id == user_id else "attendee"
 
+    # Default report preference based on mode: in interview mode, non-hosts (attendees) default to False
+    receive_report = True
+    if meeting.mode == "interview" and role != "host":
+        receive_report = False
+
+    share_details = True
+    if participant_in.share_company_details is not None:
+        share_details = participant_in.share_company_details
+
     new_participant = models.MeetingParticipant(
         meeting_id=meeting_id,
         user_id=user_id,
         display_name=participant_in.display_name,
-        role=role
+        role=role,
+        receive_report=receive_report,
+        share_company_details=share_details
     )
     db.add(new_participant)
     db.commit()
@@ -1172,3 +1212,38 @@ def create_livekit_token(
           "identity": identity,
           "display_name": display_name
       }
+
+@router.patch("/{meeting_id}/participants/{user_id}/report-settings")
+def update_participant_report_settings(
+    meeting_id: UUID,
+    user_id: UUID,
+    settings_in: schemas.ParticipantReportSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user_id: UUID = Depends(get_current_user_id)
+):
+    """Endpoint for the host to update report delivery settings for a participant."""
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+        
+    # Verify caller is the host/creator of the meeting
+    if meeting.creator_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting host can change report delivery preferences."
+        )
+        
+    # Find all rows of the participant for this meeting and update the flag
+    participants = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.user_id == user_id
+    ).all()
+    
+    if not participants:
+        raise HTTPException(status_code=404, detail="Participant not found in this meeting")
+        
+    for p in participants:
+        p.receive_report = settings_in.receive_report
+        
+    db.commit()
+    return {"status": "success", "user_id": user_id, "receive_report": settings_in.receive_report}

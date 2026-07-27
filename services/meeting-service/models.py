@@ -12,7 +12,12 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     email = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
+    company_name = Column(String, nullable=True)
+    role = Column(String, nullable=True)
+    photo_url = Column(String, nullable=True)
+    meeting_name = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 
 class Meeting(Base):
     __tablename__ = "meetings"
@@ -106,6 +111,10 @@ class MeetingParticipant(Base):
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
     left_at = Column(DateTime(timezone=True), nullable=True)
     speaking_time_seconds = Column(Integer, default=0)
+    receive_report = Column(Boolean, default=True, nullable=False)
+    share_company_details = Column(Boolean, default=True, nullable=False)
+
+
 
     meeting = relationship("Meeting")
 

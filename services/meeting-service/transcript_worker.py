@@ -61,24 +61,42 @@ def call_meeting_service(method, path, **kwargs):
     """
     Robust internal HTTP helper. 
     Since workers run in the same container as the meeting service, we try the 
-    local loopback URL (127.0.0.1:{PORT}) first for maximum speed and reliability,
-    and fall back to the configured MEETING_SERVICE_URL if the local call fails.
+    local loopback URL (127.0.0.1:{PORT} or localhost:{PORT}) first for maximum speed 
+    and reliability, and fall back to the configured MEETING_SERVICE_URL if the local call fails.
     """
+    import traceback
+
+    # 1. Try 127.0.0.1 loopback URL
     local_url = f"{LOCAL_MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
-        response = httpx.request(method, local_url, **kwargs)
+        # Use trust_env=False to bypass any proxy configurations in the container
+        response = httpx.request(method, local_url, trust_env=False, **kwargs)
         if response.status_code < 500:
             return response
-        print(f"[{method}] {local_url} returned HTTP {response.status_code}. Trying external fallback...")
+        print(f"[{method}] {local_url} returned HTTP {response.status_code}. Trying local 'localhost' fallback...")
     except Exception as e:
-        print(f"[{method}] {local_url} failed: {e}. Trying external fallback...")
+        print(f"[{method}] {local_url} failed: {e}. Trying local 'localhost' fallback...")
+        traceback.print_exc()
+
+    # 2. Try localhost loopback URL
+    localhost_url = f"http://localhost:{PORT}/{path.lstrip('/')}"
+    try:
+        response = httpx.request(method, localhost_url, trust_env=False, **kwargs)
+        if response.status_code < 500:
+            return response
+        print(f"[{method}] {localhost_url} returned HTTP {response.status_code}. Trying external fallback...")
+    except Exception as e:
+        print(f"[{method}] {localhost_url} failed: {e}. Trying external fallback...")
+        traceback.print_exc()
         
+    # 3. Fall back to external MEETING_SERVICE_URL
     url = f"{MEETING_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
         print(f"[{method}] Falling back to external URL: {url}")
         return httpx.request(method, url, **kwargs)
     except Exception as fallback_e:
         print(f"[{method}] External fallback to {url} also failed: {fallback_e}")
+        traceback.print_exc()
         raise fallback_e
 
 
@@ -367,6 +385,14 @@ def _flush_buffer(buffer_state):
 
 
 def main():
+    print("--------------------------------------------------")
+    print(f"Transcript Worker starting...")
+    print(f"PORT environment variable: {PORT}")
+    print(f"LOCAL_MEETING_SERVICE_URL: {LOCAL_MEETING_SERVICE_URL}")
+    print(f"MEETING_SERVICE_URL: {MEETING_SERVICE_URL}")
+    print(f"REDIS_URL: {REDIS_URL}")
+    print(f"REDIS_QUEUE_PREFIX: {REDIS_QUEUE_PREFIX}")
+    print("--------------------------------------------------")
     print(f"Transcript Worker started. Connecting to meeting service at {MEETING_SERVICE_URL}")
     # Clear stale audio from previous runs
     redis_client.delete(f"{REDIS_QUEUE_PREFIX}audio_queue")
