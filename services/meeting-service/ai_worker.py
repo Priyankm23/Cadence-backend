@@ -1,4 +1,11 @@
 import os
+import builtins
+import sys
+import traceback
+
+def print(*args, **kwargs):
+    builtins.print(*args, **kwargs)
+    sys.stdout.flush()
 import json
 import time
 import socket
@@ -609,12 +616,20 @@ def main():
                 
                 if queue_str == f"{REDIS_QUEUE_PREFIX}meeting_ended_queue" and meeting_id:
                     print(f"[Queue Listener] Triggering generate_meeting_report({meeting_id})...")
-                    generate_meeting_report(meeting_id)
+                    try:
+                        generate_meeting_report(meeting_id)
+                    except Exception as e:
+                        print(f"[Queue Listener] ERROR running generate_meeting_report({meeting_id}): {e}")
+                        traceback.print_exc()
                 elif queue_str == f"{REDIS_QUEUE_PREFIX}personal_analysis_queue" and meeting_id:
                     user_id = payload.get("user_id")
                     print(f"[Queue Listener] Triggering generate_personal_analysis({meeting_id}, {user_id})...")
                     if user_id:
-                        generate_personal_analysis(meeting_id, user_id)
+                        try:
+                            generate_personal_analysis(meeting_id, user_id)
+                        except Exception as e:
+                            print(f"[Queue Listener] ERROR running generate_personal_analysis({meeting_id}, {user_id}): {e}")
+                            traceback.print_exc()
             else:
                 # Debug print every 30 seconds when blpop times out
                 print("[Queue Listener] Idle. Waiting for queue messages...")
