@@ -5,6 +5,9 @@ import socket
 import redis
 import httpx
 from dotenv import load_dotenv
+from core.database import SessionLocal
+import models
+from uuid import UUID
 
 load_dotenv()
 
@@ -12,7 +15,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API","")
-AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
+AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
@@ -102,46 +105,72 @@ def call_meeting_service(method, path, **kwargs):
 
 
 def generate_meeting_report(meeting_id):
-    print(f"[{meeting_id}] STARTING ANALYSIS...")
+    print(f"[{meeting_id}] STARTING ANALYSIS (Direct DB Access)...")
     
-    # 0. Fetch meeting details via the internal endpoint (no JWT required for service-to-service)
+    db = SessionLocal()
+    meeting_data = None
+    mode = "general"
+    m_uuid = UUID(str(meeting_id))
+    
+    # 0. Fetch meeting details
     try:
-        meeting_resp = call_meeting_service("GET", f"meetings/{meeting_id}/internal", timeout=10.0)
-        if meeting_resp.status_code != 200:
-            print(f"[{meeting_id}] ERROR: Failed to fetch meeting details: {meeting_resp.status_code} - {meeting_resp.text}")
+        meeting = db.query(models.Meeting).filter(models.Meeting.id == m_uuid).first()
+        if not meeting:
+            print(f"[{meeting_id}] ERROR: Meeting not found in DB.")
             return
-        meeting_data = meeting_resp.json()
-        mode = meeting_data.get("mode", "general")
+        
+        meeting_data = {
+            "id": str(meeting.id),
+            "title": meeting.title,
+            "status": meeting.status,
+            "mode": meeting.mode,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
+            "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
+            "duration_seconds": meeting.duration_seconds
+        }
+        mode = meeting.mode or "general"
         print(f"[{meeting_id}] Mode detected: {mode}")
     except Exception as e:
-        print(f"[{meeting_id}] EXCEPTION: Error fetching meeting mode: {e}")
+        print(f"[{meeting_id}] EXCEPTION: Error fetching meeting details from DB: {e}")
+        db.close()
         return
 
     # 1. Fetch transcripts
     try:
-        response = call_meeting_service("GET", f"meetings/{meeting_id}/transcripts", timeout=10.0)
-        if response.status_code != 200:
-            print(f"[{meeting_id}] ERROR: Failed to fetch transcripts: {response.status_code}")
-            return
-        transcripts = response.json()
+        segments = db.query(models.TranscriptSegment)\
+            .filter(models.TranscriptSegment.meeting_id == m_uuid)\
+            .order_by(models.TranscriptSegment.start_time.asc()).all()
+            
+        transcripts = []
+        for s in segments:
+            transcripts.append({
+                "id": str(s.id),
+                "meeting_id": str(s.meeting_id),
+                "user_id": str(s.user_id) if s.user_id else None,
+                "user_name": s.user_name,
+                "text": s.text,
+                "start_time": s.start_time,
+                "end_time": s.end_time
+            })
     except Exception as e:
-        print(f"[{meeting_id}] EXCEPTION: Error fetching transcripts: {e}")
+        print(f"[{meeting_id}] EXCEPTION: Error fetching transcripts from DB: {e}")
+        db.close()
         return
 
     # 1.1 Fetch alerts (for anti-cheat detection)
     alerts_summary = ""
     try:
-        alerts_resp = call_meeting_service("GET", f"meetings/{meeting_id}/alerts", timeout=5.0)
-        if alerts_resp.status_code == 200:
-            alerts = alerts_resp.json()
-            tab_switches = [a for a in alerts if a.get("alert_type") == "tab_switch"]
-            if tab_switches:
-                alerts_summary = f"\nSECURITY ALERTS: The candidate switched/left the browser tab {len(tab_switches)} times during this session.\n"
+        alerts_list = db.query(models.MeetingAlert).filter(models.MeetingAlert.meeting_id == m_uuid).all()
+        tab_switches = [a for a in alerts_list if a.alert_type == "tab_switch"]
+        if tab_switches:
+            alerts_summary = f"\nSECURITY ALERTS: The candidate switched/left the browser tab {len(tab_switches)} times during this session.\n"
     except Exception as e:
         print(f"[{meeting_id}] Warning: Could not fetch alerts: {e}")
 
     if not transcripts:
         print(f"[{meeting_id}] No transcripts found. Skipping analysis.")
+        db.close()
         return
 
     # 2. Format transcript for LLM
@@ -257,24 +286,25 @@ Please return a JSON object with the following structure:
             print(f"[{meeting_id}] AI successfully parsed the transcript.")
         else:
             print(f"[{meeting_id}] ERROR: Groq API {groq_res.status_code} - {groq_res.text}")
+            db.close()
             return
     except Exception as e:
         print(f"[{meeting_id}] EXCEPTION: Error calling Groq: {e}")
+        db.close()
         return
 
-    # 4. Save Granular Data to Meeting Service
+    # 4. Save Granular Data to DB
     
     # Fetch participants to resolve assignee_ids
     participants_map = {}
     try:
-        p_res = call_meeting_service("GET", f"meetings/{meeting_id}/participants/all", timeout=5.0)
-        if p_res.status_code == 200:
-            for p in p_res.json():
-                name = p.get("user_name") or p.get("display_name")
-                if name:
-                    participants_map[name.lower()] = p.get("user_id")
+        participants = db.query(models.MeetingParticipant).filter(models.MeetingParticipant.meeting_id == m_uuid).all()
+        for p in participants:
+            name = p.display_name
+            if name:
+                participants_map[name.lower()] = p.user_id
     except Exception as e:
-        print(f"[{meeting_id}] Warning: Could not fetch participants for assignee resolution: {e}")
+        print(f"[{meeting_id}] Warning: Could not fetch participants: {e}")
 
     # Action Items
     for item in ai_output.get("action_items", []):
@@ -290,8 +320,6 @@ Please return a JSON object with the following structure:
             parts = desc_raw.rsplit(" - ", 1)
             task = parts[0].strip()
             owner = parts[1].strip().lower()
-            
-            # Match owner name to a participant UUID
             for p_name, p_id in participants_map.items():
                 if owner in p_name or p_name in owner:
                     assignee_id = p_id
@@ -305,41 +333,33 @@ Please return a JSON object with the following structure:
                     assignee_id = p_id
                     break
 
-        # If we couldn't resolve the assignee, we just keep the raw description so frontend fallback works
-        # If we resolved it, we ideally save just the task, but saving the full desc ensures old frontend code still works perfectly
-        # until the frontend is updated to use the assignee_id. Let's save the task only if we found an assignee, 
-        # or actually let's save the full description to not break the frontend right now, but set the assignee_id.
-        # Actually, if we set the assignee_id, we can safely save just the task if we want, but since user said
-        # frontend splits by "-", let's keep the "-" in the description for now to not break the frontend immediately.
-
-        payload = {
-            "description": desc_raw,
-            "is_completed": False
-        }
-        if assignee_id:
-            payload["assignee_id"] = assignee_id
-
         try:
-            call_meeting_service(
-                "POST",
-                f"meetings/{meeting_id}/action-items",
-                json=payload,
-                timeout=5.0
+            from uuid import uuid4
+            db_action = models.ActionItem(
+                id=uuid4(),
+                meeting_id=m_uuid,
+                description=desc_raw,
+                is_completed=False,
+                assignee_id=assignee_id
             )
+            db.add(db_action)
+            db.flush()
         except Exception as e:
-            print(f"[{meeting_id}] Warning: Could not save action item: {e}")
+            print(f"[{meeting_id}] Warning: Could not save action item to DB: {e}")
 
     # Decisions
     for dec in ai_output.get("decisions", []):
         try:
-            call_meeting_service(
-                "POST",
-                f"meetings/{meeting_id}/decisions",
-                json={"description": dec},
-                timeout=5.0
+            from uuid import uuid4
+            db_decision = models.Decision(
+                id=uuid4(),
+                meeting_id=m_uuid,
+                description=dec
             )
+            db.add(db_decision)
+            db.flush()
         except Exception as e:
-            print(f"[{meeting_id}] Warning: Could not save decision: {e}")
+            print(f"[{meeting_id}] Warning: Could not save decision to DB: {e}")
 
     # 5. Save final Analysis
     try:
@@ -351,104 +371,124 @@ Please return a JSON object with the following structure:
         if "resolved_qna" in ai_output:
             insights_data["resolved_qna"] = ai_output["resolved_qna"]
 
-        save_payload = {
+        existing_analysis = db.query(models.MeetingAnalysis).filter(models.MeetingAnalysis.meeting_id == m_uuid).first()
+        if existing_analysis:
+            existing_analysis.summary = ai_output.get("summary", "")
+            existing_analysis.sentiment = ai_output.get("sentiment", "Neutral")
+            existing_analysis.mode = mode
+            existing_analysis.insights = insights_data
+        else:
+            from uuid import uuid4
+            db_analysis = models.MeetingAnalysis(
+                id=uuid4(),
+                meeting_id=m_uuid,
+                summary=ai_output.get("summary", ""),
+                sentiment=ai_output.get("sentiment", "Neutral"),
+                mode=mode,
+                insights=insights_data
+            )
+            db.add(db_analysis)
+        
+        db.commit()
+        print(f"[{meeting_id}] ANALYSIS SAVED SUCCESSFULLY TO DB.")
+        
+        # Calculate duration
+        duration_seconds = meeting_data.get("duration_seconds")
+        duration_val = "N/A"
+        if duration_seconds is not None:
+            duration_val = str(max(1, round(duration_seconds / 60)))
+        
+        # Format date beautifully
+        created_at_str = meeting_data.get("created_at")
+        date_formatted = "Recent"
+        if created_at_str:
+            try:
+                clean_dt_str = created_at_str.replace("Z", "+00:00")
+                from datetime import datetime
+                dt = datetime.fromisoformat(clean_dt_str)
+                date_formatted = dt.strftime("%B %d, %Y")
+            except Exception as e:
+                print(f"[{meeting_id}] Warning formatting date: {e}")
+                date_formatted = "Recent"
+
+        # 6. Trigger Notifications
+        report_data = {
+            "title": meeting_data.get("title", f"Meeting {str(meeting_id)[:8]}"),
             "summary": ai_output.get("summary", ""),
-            "sentiment": ai_output.get("sentiment", "Neutral"),
-            "mode": mode,
-            "insights": insights_data
+            "action_items": [item.get("description") for item in ai_output.get("action_items", [])],
+            "decisions": ai_output.get("decisions", []),
+            "duration": duration_val,
+            "date": date_formatted
         }
         
-        save_res = call_meeting_service(
-            "POST",
-            f"meetings/{meeting_id}/analysis",
-            json=save_payload,
-            timeout=10.0
-        )
-        if save_res.status_code == 200:
-            print(f"[{meeting_id}] ANALYSIS SAVED SUCCESSFULLY.")
-            
-            # Calculate duration
-            duration_seconds = meeting_data.get("duration_seconds")
-            duration_val = "N/A"
-            if duration_seconds is not None:
-                duration_val = str(max(1, round(duration_seconds / 60)))
-            
-            # Format date beautifully
-            created_at_str = meeting_data.get("created_at")
-            date_formatted = "Recent"
-            if created_at_str:
-                try:
-                    clean_dt_str = created_at_str.replace("Z", "+00:00")
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(clean_dt_str)
-                    date_formatted = dt.strftime("%B %d, %Y")
-                except Exception as e:
-                    print(f"[{meeting_id}] Warning formatting date: {e}")
-                    date_formatted = "Recent"
-
-            # 6. Trigger Notifications
-            report_data = {
-                "title": meeting_data.get("title", f"Meeting {str(meeting_id)[:8]}"),
-                "summary": ai_output.get("summary", ""),
-                "action_items": [item.get("description") for item in ai_output.get("action_items", [])],
-                "decisions": ai_output.get("decisions", []),
-                "duration": duration_val,
-                "date": date_formatted
-            }
-            
-            try:
-                # Fetch all participants to get their emails
-                participants_res = call_meeting_service("GET", f"meetings/{meeting_id}/participants/all", timeout=5.0)
-                if participants_res.status_code == 200:
-                    participants = participants_res.json()
-                    for p in participants:
-                        if p.get("receive_report", True):
-                            email = p.get("email")
-                            if email:
-                                try:
-                                    celery_client.send_task(
-                                        "send_meeting_summary_email",
-                                        kwargs={
-                                            "meeting_id": str(meeting_id),
-                                            "to_email": email,
-                                            "report_data": report_data
-                                        }
-                                    )
-                                    print(f"[{meeting_id}] Notification task dispatched to {email}.")
-                                except Exception as e:
-                                    print(f"[{meeting_id}] Warning: Notification failed for {email}: {e}")
-                        else:
-                            print(f"[{meeting_id}] Skipping summary email for {p.get('email') or p.get('user_id')} per report settings.")
-
+        try:
+            participants = db.query(models.MeetingParticipant).filter(models.MeetingParticipant.meeting_id == m_uuid).all()
+            for p in participants:
+                user_email = None
+                if p.user_id:
+                    user_record = db.query(models.User).filter(models.User.id == p.user_id).first()
+                    if user_record:
+                        user_email = user_record.email
+                
+                receive_report = p.receive_report if p.receive_report is not None else True
+                if receive_report:
+                    email = user_email or p.email
+                    if email:
+                        try:
+                            celery_client.send_task(
+                                "send_meeting_summary_email",
+                                kwargs={
+                                    "meeting_id": str(meeting_id),
+                                    "to_email": email,
+                                    "report_data": report_data
+                                }
+                            )
+                            print(f"[{meeting_id}] Notification task dispatched to {email}.")
+                        except Exception as e:
+                            print(f"[{meeting_id}] Warning: Notification failed for {email}: {e}")
                 else:
-                    print(f"[{meeting_id}] Warning: Could not fetch participants for notifications.")
-            except Exception as e:
-                print(f"[{meeting_id}] Warning: Notification fetching failed: {e}")
-        else:
-            print(f"[{meeting_id}] ERROR: Failed to save analysis {save_res.status_code}")
+                    print(f"[{meeting_id}] Skipping summary email for {user_email or p.email or p.user_id} per report settings.")
+        except Exception as e:
+            print(f"[{meeting_id}] Warning: Notification dispatching failed: {e}")
     except Exception as e:
-        print(f"[{meeting_id}] EXCEPTION: Error saving final analysis: {e}")
+        db.rollback()
+        print(f"[{meeting_id}] EXCEPTION in saving final analysis to DB: {e}")
+    finally:
+        db.close()
+
 
 def generate_personal_analysis(meeting_id, user_id):
-    print(f"[{meeting_id} - {user_id}] STARTING PERSONAL ANALYSIS...")
+    print(f"[{meeting_id} - {user_id}] STARTING PERSONAL ANALYSIS (Direct DB Access)...")
+    
+    db = SessionLocal()
+    m_uuid = UUID(str(meeting_id))
+    u_uuid = UUID(str(user_id))
     
     try:
-        response = call_meeting_service("GET", f"meetings/{meeting_id}/transcripts/user/{user_id}", timeout=10.0)
-        if response.status_code != 200:
-            print(f"[{meeting_id} - {user_id}] ERROR: Failed to fetch transcripts.")
-            return
-        transcripts = response.json()
+        segments = db.query(models.TranscriptSegment)\
+            .filter(models.TranscriptSegment.meeting_id == m_uuid, models.TranscriptSegment.user_id == u_uuid)\
+            .order_by(models.TranscriptSegment.start_time.asc()).all()
+            
+        transcripts = []
+        for s in segments:
+            transcripts.append({
+                "user_name": s.user_name,
+                "text": s.text,
+                "start_time": s.start_time
+            })
     except Exception as e:
-        print(f"[{meeting_id} - {user_id}] EXCEPTION: {e}")
+        print(f"[{meeting_id} - {user_id}] EXCEPTION fetching transcripts: {e}")
+        db.close()
         return
 
     if not transcripts:
         print(f"[{meeting_id} - {user_id}] No transcripts found for user.")
+        db.close()
         return
 
     formatted_transcript = ""
     for t in transcripts:
-        user_name = t.get("user_name") or t.get("user_id", "Unknown")
+        user_name = t.get("user_name") or "Unknown"
         
         # Format start_time (stored in milliseconds) to human-readable time [MM:SS] or [HH:MM:SS]
         start_ms = t.get("start_time")
@@ -508,24 +548,36 @@ Please analyze this individual's performance and return a JSON object with the f
             ai_output = json.loads(content_str)
         else:
             print(f"[{meeting_id} - {user_id}] ERROR: Groq API {groq_res.status_code}")
+            db.close()
             return
     except Exception as e:
         print(f"[{meeting_id} - {user_id}] EXCEPTION: Error calling Groq: {e}")
+        db.close()
         return
 
     try:
-        save_res = call_meeting_service(
-            "POST",
-            f"meetings/{meeting_id}/transcripts/user/{user_id}/analysis",
-            json={"analysis_data": ai_output},
-            timeout=10.0
-        )
-        if save_res.status_code == 200:
-            print(f"[{meeting_id} - {user_id}] PERSONAL ANALYSIS SAVED SUCCESSFULLY.")
+        existing_coach = db.query(models.UserTranscriptAnalysis)\
+            .filter(models.UserTranscriptAnalysis.meeting_id == m_uuid, models.UserTranscriptAnalysis.user_id == u_uuid)\
+            .first()
+            
+        if existing_coach:
+            existing_coach.analysis_data = ai_output
         else:
-            print(f"[{meeting_id} - {user_id}] ERROR saving analysis {save_res.status_code} - {save_res.text}")
+            from uuid import uuid4
+            db_coach = models.UserTranscriptAnalysis(
+                id=uuid4(),
+                meeting_id=m_uuid,
+                user_id=u_uuid,
+                analysis_data=ai_output
+            )
+            db.add(db_coach)
+        db.commit()
+        print(f"[{meeting_id} - {user_id}] PERSONAL ANALYSIS SAVED SUCCESSFULLY TO DB.")
     except Exception as e:
-        print(f"[{meeting_id} - {user_id}] EXCEPTION saving analysis: {e}")
+        db.rollback()
+        print(f"[{meeting_id} - {user_id}] EXCEPTION saving analysis to DB: {e}")
+    finally:
+        db.close()
 
 
 def main():
@@ -548,19 +600,25 @@ def main():
             ], timeout=30)
             if result:
                 queue_name, payload_str = result
+                queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
+                print(f"[Queue Listener] Popped item from '{queue_str}': {payload_str}")
+                
                 payload = json.loads(payload_str)
                 meeting_id = payload.get("meeting_id")
-                
-                queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
+                print(f"[Queue Listener] Parsed meeting_id: {meeting_id}")
                 
                 if queue_str == f"{REDIS_QUEUE_PREFIX}meeting_ended_queue" and meeting_id:
+                    print(f"[Queue Listener] Triggering generate_meeting_report({meeting_id})...")
                     generate_meeting_report(meeting_id)
                 elif queue_str == f"{REDIS_QUEUE_PREFIX}personal_analysis_queue" and meeting_id:
                     user_id = payload.get("user_id")
+                    print(f"[Queue Listener] Triggering generate_personal_analysis({meeting_id}, {user_id})...")
                     if user_id:
                         generate_personal_analysis(meeting_id, user_id)
+            else:
+                # Debug print every 30 seconds when blpop times out
+                print("[Queue Listener] Idle. Waiting for queue messages...")
         except redis.exceptions.TimeoutError:
-            # Ignore standard socket timeouts when the queue is idle
             continue
         except redis.exceptions.ConnectionError as e:
             print(f"Queue connection error: {e}")

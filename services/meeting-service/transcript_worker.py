@@ -366,7 +366,7 @@ def _flush_buffer(buffer_state):
             "POST",
             f"meetings/{meeting_uuid}/transcripts",
             json=transcript_payload,
-            timeout=10.0
+            timeout=30.0
         )
         if save_response.status_code != 200:
             print(f"[{meeting_id}] Failed to save transcript: "
