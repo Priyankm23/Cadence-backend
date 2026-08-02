@@ -599,15 +599,21 @@ def main():
     print("--------------------------------------------------")
     print(f"AI Service Worker started. Listening to queues...")
     
+    last_idle_print = 0
     while True:
         try:
-            result = redis_client.blpop([
-                f"{REDIS_QUEUE_PREFIX}meeting_ended_queue",
-                f"{REDIS_QUEUE_PREFIX}personal_analysis_queue"
-            ], timeout=30)
-            if result:
-                queue_name, payload_str = result
-                queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
+            # 1. Pop from meeting_ended_queue
+            queue_name = f"{REDIS_QUEUE_PREFIX}meeting_ended_queue"
+            payload_bytes = redis_client.rpop(queue_name)
+            
+            # 2. If empty, pop from personal_analysis_queue
+            if not payload_bytes:
+                queue_name = f"{REDIS_QUEUE_PREFIX}personal_analysis_queue"
+                payload_bytes = redis_client.rpop(queue_name)
+                
+            if payload_bytes:
+                queue_str = queue_name
+                payload_str = payload_bytes.decode() if isinstance(payload_bytes, bytes) else payload_bytes
                 print(f"[Queue Listener] Popped item from '{queue_str}': {payload_str}")
                 
                 payload = json.loads(payload_str)
@@ -631,8 +637,11 @@ def main():
                             print(f"[Queue Listener] ERROR running generate_personal_analysis({meeting_id}, {user_id}): {e}")
                             traceback.print_exc()
             else:
-                # Debug print every 30 seconds when blpop times out
-                print("[Queue Listener] Idle. Waiting for queue messages...")
+                current_time = time.time()
+                if current_time - last_idle_print >= 30:
+                    print("[Queue Listener] Idle. Waiting for queue messages...")
+                    last_idle_print = current_time
+                time.sleep(2)
         except redis.exceptions.TimeoutError:
             continue
         except redis.exceptions.ConnectionError as e:
