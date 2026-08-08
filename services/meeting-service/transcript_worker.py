@@ -31,6 +31,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 BUFFER_TARGET_MS = int(os.getenv("TRANSCRIPT_BUFFER_TARGET_MS", "5000"))
 BUFFER_MAX_MS = int(os.getenv("TRANSCRIPT_BUFFER_MAX_MS", "15000"))
@@ -136,7 +137,7 @@ def create_wav_buffer(raw_bytes, sample_rate=16000, channels=1, sample_width=2):
         wav_file.setnchannels(channels)
         wav_file.setsampwidth(sample_width)
         wav_file.setframerate(sample_rate)
-        wav_file.writeframes(raw_bytes)
+        wav_file.writeframes(raw_bytes) 
     wav_io.seek(0)
     return wav_io
 
@@ -231,10 +232,57 @@ def _submit_buffer(buffer_state):
     buffer_state["end_ms"] = buffer_state.get("end_ms")
 
 
+class MockResponse:
+    def __init__(self, text_content, status_code, raw_text="", provider="Deepgram"):
+        self.text_content = text_content
+        self.status_code = status_code
+        self.text = raw_text
+        self.provider = provider
+
+    def json(self):
+        return {"text": self.text_content}
+
+
 def _call_groq_with_retry(wav_bytes, max_retries=3):
+    # 1. Check if Deepgram is configured
+    if DEEPGRAM_API_KEY:
+        url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en"
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "audio/wav"
+        }
+        delay = 1.0
+        for attempt in range(max_retries):
+            try:
+                response = httpx.post(
+                    url,
+                    content=wav_bytes,
+                    headers=headers,
+                    timeout=15.0
+                )
+                if response.status_code == 200:
+                    resp_data = response.json()
+                    transcript = resp_data["results"]["channels"][0]["alternatives"][0]["transcript"]
+                    return MockResponse(transcript, 200, provider="Deepgram")
+                if response.status_code == 429:
+                    print(f"Deepgram rate limited (attempt {attempt + 1}/{max_retries}), "
+                          f"retrying in {delay}s...")
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                        delay *= 2
+                    continue
+                # Any other Deepgram error
+                return MockResponse("", response.status_code, response.text, provider="Deepgram")
+            except Exception as e:
+                print(f"Exception calling Deepgram (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                continue
+        return None
+
+    # 2. Fallback to original Groq Whisper code
     delay = 1.0
-    # Fixed prompt — dynamic prompt updates caused race conditions between
-    # threads sharing meeting_buffers and didn't meaningfully improve accuracy.
     prompt_text = "Transcribe this meeting audio exactly as spoken."
     for attempt in range(max_retries):
         files = {'file': ('audio.wav', wav_bytes, 'audio/wav')}
@@ -245,24 +293,32 @@ def _call_groq_with_retry(wav_bytes, max_retries=3):
             'prompt': prompt_text,
         }
         headers = {'Authorization': f'Bearer {GROQ_API}'}
-        response = httpx.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            files=files,
-            data=data,
-            headers=headers,
-            timeout=15.0
-        )
-        if response.status_code == 200:
+        try:
+            response = httpx.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=15.0
+            )
+            if response.status_code == 200:
+                response.provider = "Groq"
+                return response
+            if response.status_code == 429:
+                print(f"Groq rate limited (attempt {attempt + 1}/{max_retries}), "
+                      f"retrying in {delay}s...")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                continue
+            response.provider = "Groq"
             return response
-        if response.status_code == 429:
-            print(f"Groq rate limited (attempt {attempt + 1}/{max_retries}), "
-                  f"retrying in {delay}s...")
+        except Exception as e:
+            print(f"Exception calling Groq (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(delay)
                 delay *= 2
             continue
-        # Any other error — return immediately, no retry
-        return response
     return None
 
 
@@ -313,10 +369,12 @@ def _flush_buffer(buffer_state):
     response = _call_groq_with_retry(wav_buffer.read())
 
     if response is None:
-        print(f"[{meeting_id}] Groq request failed after all retries.")
+        print(f"[{meeting_id}] Transcription request failed after all retries.")
         return
+
+    provider = getattr(response, "provider", "Transcription")
     if response.status_code != 200:
-        print(f"[{meeting_id}] Groq API Error: {response.status_code} - {response.text}")
+        print(f"[{meeting_id}] {provider} API Error: {response.status_code} - {response.text}")
         return
 
     result = response.json()
@@ -344,7 +402,7 @@ def _flush_buffer(buffer_state):
         print(f"[{meeting_id}] Text too short, likely hallucination: '{text}'")
         return
 
-    print(f"[{meeting_id}] {user_name}: {text}")
+    print(f"[{meeting_id}] {user_name} ({provider}): {text}")
 
     # Save transcript to meeting service
     try:

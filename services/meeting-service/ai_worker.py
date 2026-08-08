@@ -22,7 +22,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "")
 MEETING_SERVICE_URL = os.getenv("MEETING_SERVICE_URL", "http://localhost:8002")
 GROQ_API = os.getenv("GROQ_API","")
-AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
+AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
 
 if not GROQ_API:
     print("WARNING: GROQ_API environment variable is not set. AI analysis will fail.")
@@ -109,6 +109,20 @@ def call_meeting_service(method, path, **kwargs):
         print(f"[{method}] External fallback to {url} also failed: {fallback_e}")
         traceback.print_exc()
         raise fallback_e
+
+
+last_groq_api_call_time = 0.0
+MIN_API_INTERVAL_SECONDS = 12.0  # Enforce minimum 12 seconds between Groq calls to smooth out TPM
+
+def enforce_rate_limit_delay():
+    global last_groq_api_call_time
+    now = time.time()
+    elapsed = now - last_groq_api_call_time
+    if elapsed < MIN_API_INTERVAL_SECONDS:
+        sleep_needed = MIN_API_INTERVAL_SECONDS - elapsed
+        print(f"[Rate Limiter] Sleeping {sleep_needed:.2f}s to smooth out Groq API TPM limits...")
+        time.sleep(sleep_needed)
+    last_groq_api_call_time = time.time()
 
 
 def generate_meeting_report(meeting_id):
@@ -255,7 +269,7 @@ Please return a JSON object with the following structure:
     }}
   ],
   "action_items": [
-    {{ "description": "Clear, actionable task (include assignee if known, e.g., 'Notify Priyanshu of the final decision - Priyansh')" }}
+    {{ "description": "Clear, actionable task (include assignee if known, e.g., 'Notify Priyanshu of the final decision - Priyansh'). If no specific action items were assigned in the meeting, return a single item with the description: 'No specific action items were assigned in the meeting.'" }}
   ],
   "decisions": ["Decision 1", "Decision 2"],
   "insights": {{ ... mode specific details ... }}
@@ -280,6 +294,7 @@ Please return a JSON object with the following structure:
     }
 
     try:
+        enforce_rate_limit_delay()
         groq_res = httpx.post(
             "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
@@ -317,6 +332,12 @@ Please return a JSON object with the following structure:
     for item in ai_output.get("action_items", []):
         desc_raw = item.get("description", "")
         if not desc_raw:
+            continue
+            
+        # Ignore placeholder descriptions indicating no action items were assigned
+        desc_lower = desc_raw.lower().strip()
+        if "no specific action item" in desc_lower or "no action item" in desc_lower:
+            print(f"[{meeting_id}] Skipping database storage for placeholder action item: '{desc_raw}'")
             continue
             
         task = desc_raw
@@ -543,6 +564,7 @@ Please analyze this individual's performance and return a JSON object with the f
     }
 
     try:
+        enforce_rate_limit_delay()
         groq_res = httpx.post(
             "https://api.groq.com/openai/v1/chat/completions",
             json=payload,

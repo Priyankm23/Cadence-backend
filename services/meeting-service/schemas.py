@@ -95,6 +95,11 @@ class MeetingAlert(MeetingAlertBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+class MeetingAlertCreate(BaseModel):
+    user_id: UUID
+    alert_type: str
+    details: Optional[str] = None
+
 class TranscriptSegmentCreate(BaseModel):
     user_id: UUID
     user_name: Optional[str] = None

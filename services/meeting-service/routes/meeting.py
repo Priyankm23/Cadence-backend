@@ -892,6 +892,27 @@ def list_meeting_alerts(
 ):
     return db.query(models.MeetingAlert).filter(models.MeetingAlert.meeting_id == meeting_id).all()
 
+@router.post("/{meeting_id}/alerts", response_model=schemas.MeetingAlert)
+def create_meeting_alert(
+    meeting_id: UUID,
+    alert_in: schemas.MeetingAlertCreate,
+    db: Session = Depends(get_db)
+):
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+        
+    alert = models.MeetingAlert(
+        meeting_id=meeting_id,
+        user_id=alert_in.user_id,
+        alert_type=alert_in.alert_type,
+        details=alert_in.details
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    return alert
+
 @router.post("/{meeting_id}/transcripts", response_model=schemas.TranscriptSegment)
 def create_transcript_segment(
     meeting_id: UUID,
