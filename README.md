@@ -1,14 +1,32 @@
-# Cadence-AI: Intelligent Meeting Platform Backend
+# Cadence — AI-Powered Speech Intelligence Platform
 
-Cadence-AI is a self-hosted, microservice-based AI Meeting Intelligence Platform designed to capture real-time audio/video meetings in the browser, generate live speaker-attributed transcriptions, detect user integrity signals (tab switches/alerts), and compile structured, mode-aware post-meeting summaries with action items, decisions, and speaker analytics.
+> **"Speak. Record. Walk away with intelligence."**
 
-This repository hosts the complete backend microservices architecture.
+Cadence started as an AI Meeting Intelligence platform and has grown into a **Speech Intelligence Suite** — a self-hosted, microservice-based system that captures any human speech context (live meetings, voice memos, candidate interviews, business calls), transcribes it in real-time, and compiles structured, mode-aware intelligence reports with action items, decisions, and deep speaker analytics.
+
+This repository contains the complete backend microservices architecture powering the [Cadence frontend](https://github.com/Priyankm23/cadence-frontend).
 
 ---
 
-## 🏗️ System Architecture & Topography
+## 🚀 What Cadence Does Today
 
-The system utilizes a modern, resilient microservice pattern designed to keep container hosting lightweight, performant, and completely free of expensive GPU dependencies.
+| Capability | Details |
+|---|---|
+| **Live Meetings** | Browser-based WebRTC rooms (via LiveKit) with real-time transcription, participant management, and role-based access |
+| **Voice Memos** | Record personal audio memos (no room required) — transcribed and processed into clean AI-structured documents |
+| **AI Meeting Modes** | `General`, `Business`, `Interview` — each triggers a specialized LLM prompt for domain-specific intelligence |
+| **Real-Time Transcription** | Deepgram Nova-2 (primary) with Groq Whisper fallback, filtered by Silero VAD for noise/silence rejection |
+| **Post-Meeting Analysis** | LLaMA-3.3-70B via Groq produces structured JSON: summaries, action items, decisions, sentiment, speaker analytics |
+| **Personal Coaching** | Per-participant transcript analysis: talk time, communication rating, coaching tips, confidence score |
+| **Integrity Monitoring** | Tab-switch detection for interview mode — live alerts to host, persisted as violation markers |
+| **Email Reports** | OAuth2 Gmail API sends formatted HTML reports to all participants post-meeting |
+| **Meeting History** | Dashboard showing all past meetings and memos with their AI reports and status |
+
+---
+
+## 🏗️ System Architecture
+
+The system uses a modern microservice pattern designed to be lightweight, GPU-free, and deployable on free-tier infrastructure.
 
 ```
                   ┌────────────────────────────────────────────────────────┐
@@ -17,6 +35,7 @@ The system utilizes a modern, resilient microservice pattern designed to keep co
                   └───────────┬────────────────────────────┬───────────────┘
                               │                            │
                      /auth or /meetings                 /socket.io
+                     /memos                             (WebSocket)
                               │                            │
                   ┌───────────▼────────────────────────────┼────────────────
                   │              API Gateway (Port 8000)   │
@@ -29,264 +48,425 @@ The system utilizes a modern, resilient microservice pattern designed to keep co
    ┌────────▼──────────────┐           ┌────────▼──────────▼────┐
    │ Auth Service          │           │ Meeting Service        │
    │ (Port 8001)           │           │ (Port 8002 - ASGI)     │
-   │ Registration, Login & │           │ Signaling, Rooms, Meta │
-   │ JWT Refresh Cookies   │           │ & Subprocess Worker Host│
+   │ Registration, Login & │           │ Meetings, Memos,       │
+   │ JWT Refresh Cookies   │           │ Signaling & Worker Host│
    └────────┬──────────────┘           └────────┬──────────▲────┘
             │                                   │          │
-            │  Shared Neon PostgreSQL Cloud DB  │          │ Redis Pub/Sub Live
-            └─────────────────┬─────────────────┘          │ Transcripts Broadcast
+            │  Shared Neon PostgreSQL Cloud DB  │          │ Redis Pub/Sub
+            └─────────────────┬─────────────────┘          │ (Live Transcripts)
                               │                            │
    ┌──────────────────────────▼────────────────────────────┴────────────────
    │                        Redis Message Broker & Pub/Sub
-   │           Queues: `audio_queue`, `meeting_ended_queue`, `personal_analysis_queue`
+   │     Queues: `audio_queue`, `meeting_ended_queue`, `personal_analysis_queue`
    └──────────────────────────┬────────────────────────────┬────────────────
                               │                            │
                    Pops raw audio chunks           Pops completed meetings
                               │                            │
                   ┌───────────▼───────────┐    ┌───────────▼───────────┐
                   │ Transcript Worker     │    │ AI Analysis Worker    │
-                  │ (Local Silero VAD +   │    │ (Groq LLaMA-3.3 70B   │
-                  │ Groq Whisper API)     │    │ Analysis & Reports)   │
-                  └───────────────────────┘    └───────────┬───────────┘
-                                                           │
-                                                  Dispatches email task
-                                                           │
-                                                ┌───────────▼───────────┐
-                                                │ Notification Worker   │
-                                                │ (Celery Daemon +      │
-                                                │ Gmail OAuth2 API)     │
-                                                └───────────────────────┘
+                  │ (Silero VAD +         │    │ (Groq LLaMA-3.3 70B   │
+                  │  Deepgram Nova-2 /    │    │  Mode-Aware Reports)  │
+                  │  Groq Whisper)        │    └───────────┬───────────┘
+                  └───────────────────────┘               │
+                                                 Dispatches email task
+                                                          │
+                                               ┌───────────▼───────────┐
+                                               │ Notification Worker   │
+                                               │ (Celery Daemon +      │
+                                               │  Gmail OAuth2 API)    │
+                                               └───────────────────────┘
 ```
 
 ---
 
 ## 🛠️ Microservice Breakdown
 
-The backend is composed of **three primary executable web services** and **three asynchronous background workers** managed through a unified process coordinator.
-
 ### 1. API Gateway (`services/api-gateway`)
-The single entry point for all HTTP traffic entering the microservices mesh.
-* **Technology:** FastAPI, HTTPX Async Client, Starlette Custom Middleware.
-* **Authentication Guard:** Runs [AuthMiddleware](services/api-gateway/middleware/auth.py) which intercepts requests, verifies JWT access tokens against a shared secret, and rejects unauthenticated requests for private paths.
-* **Header Injection:** Extracts the authenticated user's ID and injects it downstream in the proxy request headers as `X-User-ID`.
-* **Telemetry & Tracking:** Assigns a unique `X-Request-ID` UUID to every incoming HTTP request for end-to-end tracing across service logs.
-* **Dynamic CORS:** Supports multi-origin development environments, custom hosting domains, and matches dynamic Vercel previews using regex: `https://.*\.vercel\.app`.
+The single entry point for all HTTP traffic.
+- **Technology:** FastAPI, HTTPX Async Client, Starlette Custom Middleware
+- **Auth Guard:** `AuthMiddleware` intercepts and verifies JWT access tokens; injects `X-User-ID` into downstream proxies
+- **Request Tracing:** Assigns a unique `X-Request-ID` UUID to every request for end-to-end log correlation
+- **Dynamic CORS:** Supports multiple origins + regex matching for Vercel preview deployments
+- **Memo Routing:** Proxies all `/memos/*` requests to the meeting-service's dedicated memo router
 
 ### 2. Auth Service (`services/auth-service`)
-Responsible for credentials, session lifecycles, and user registration.
-* **Technology:** FastAPI, Passlib (Bcrypt), Python-Jose, SQLAlchemy, Alembic.
-* **Security Patterns:** 
-  * Registration checks for existing emails and hashes passwords.
-  * Login issues short-lived JWT Access Tokens returned in the JSON payload, and sets a cryptographically secure, HttpOnly `refresh_token` cookie.
-  * Refresh token rotation automatically invalidates old tokens and rotates the cookie session.
-  * Batch querying endpoint (`/auth/users/batch`) resolves lists of UUIDs into user names and profiles for downstream meeting participant lookups.
+Handles credentials, session management, and user identity.
+- **Technology:** FastAPI, Passlib (Bcrypt), Python-Jose, SQLAlchemy, Alembic
+- **JWT Pattern:** Short-lived access tokens in JSON payload + HttpOnly `refresh_token` cookie with automatic rotation
+- **Batch Resolution:** `/auth/users/batch` resolves lists of UUIDs into names/profiles for participant lookup
 
 ### 3. Meeting Service (`services/meeting-service`)
-The coordinator of meetings, metadata, scheduling, and live signaling.
-* **Technology:** FastAPI, Python-Socketio (ASGI), SQLAlchemy, Redis-py.
-* **Subprocess Lifespan Orchestrator:** The application [lifespan](services/meeting-service/main.py#L77-L117) acts as a daemon manager. When the FastAPI server starts, it spawns the background worker scripts (`transcript_worker.py`, `ai_worker.py`, and the Celery `notification_worker` process) as managed subprocesses. This removes the need to deploy and manage 6 distinct processes separately in local/VPS environments.
-* **Signaling & Socket.io Events:**
-  * `join_room` & `leave_room`: Manages participants in real-time rooms.
-  * `audio_chunk`: Accepts streaming raw PCM audio payload chunks (Base64 or binary) from client microphones and pushes them onto the Redis `audio_queue`.
-  * `tab_switch_alert`: Receives browser visibility alerts when a user switches tabs, broadcasts the warning live to the room host (crucial for interview/integrity mode), and persists the violation to the DB.
-  * `send_message`: Routes instant chat messages to room participants.
-  * `end_meeting_for_all`: Allows the meeting creator to force close a room.
-* **Redis Pub/Sub Listener:** Runs a persistent async Redis subscription task listening on the `transcript_updates` channel. When a transcript segment is processed by the background worker, this listener captures it and pushes it live to the corresponding socket room.
+The coordinator for both live meetings and voice memos — the platform's core service.
+- **Technology:** FastAPI, Python-Socketio (ASGI), SQLAlchemy, Redis-py, LiveKit SDK
+- **Subprocess Lifespan Orchestrator:** On server start, the FastAPI lifespan spawns all three background worker scripts as managed subprocesses — no separate process management needed locally or on a VPS
+- **Meeting Modes:** `general` | `business` | `interview` | `memo` — stored per meeting, used to select the AI analysis prompt
+- **Memo Template Support:** Voice memos carry an optional `memo_template` field (`clean`, `structured`, `cornell`) to customize how the LLM formats the output document
+
+**Socket.io Events:**
+| Direction | Event | Purpose |
+|---|---|---|
+| Client → Server | `join_room` / `leave_room` | Participant lifecycle |
+| Client → Server | `audio_chunk` | Streaming raw PCM audio (Base64-encoded, 16kHz mono) |
+| Client → Server | `tab_switch_alert` | Interviewee integrity violation signal |
+| Client → Server | `send_message` | In-room chat routing |
+| Client → Server | `end_meeting_for_all` | Host force-closes the room |
+| Server → Client | `transcript_update` | Live transcription pushed to room |
+| Server → Client | `user_joined` / `user_left` | Participant presence updates |
+| Server → Client | `room_ended` | Room closure signal to all participants |
 
 ---
 
 ## ⚙️ Asynchronous Worker Subsystems
 
-The processing pipelines are decoupled from the web servers via Redis task queues, preventing heavy processing workloads from blocking web loop loops.
+### 1. Transcript Worker (`transcript_worker.py`)
+Processes raw audio chunks from the Redis `audio_queue` in a BLPOP loop.
 
-### 1. Transcript Worker (`services/meeting-service/transcript_worker.py`)
-Consumes raw audio chunks from Redis's `audio_queue` to perform real-time speech transcription.
-* **Voice Activity Detection (VAD):** Normalizes incoming 16-bit integer PCM raw bytes to float32 range `[-1.0, 1.0]` and runs it locally through the state-of-the-art **Silero VAD** model using PyTorch. If no human speech is detected, the chunk is immediately dropped to prevent Groq API calls and stop Whisper from producing silent hallucinations.
-* **Groq Cloud Whisper Integration:** Speech-containing chunks are packaged into WAV buffers and transcribed via Groq's high-speed cloud endpoint using `whisper-large-v3`.
-* **Hallucination Filtration & Text Cleaning:** Post-processes text using a strict lowercase filter list (discarding Whisper anomalies like *"Thank you for watching"*, *"Please subscribe"*, or single-character noise) and ignores chunks shorter than 4 characters.
-* **Real-time Synchronization:** Calls the local internal endpoint to save the transcript segment in the DB and publishes a notification payload to the `transcript_updates` Redis pub/sub channel.
+**Processing Pipeline:**
+1. **Buffer Accumulation:** Chunks from the same `meeting_id:user_id` are accumulated into 5–15s windows or flushed on >1.2s silence gaps
+2. **VAD Filtering:** Converts Int16 PCM → Float32 → PyTorch tensor → runs **Silero VAD**. Chunks with no detected speech are silently dropped
+3. **Transcription (Primary — Deepgram Nova-2):** Speech-confirmed buffers are wrapped in a WAV header and sent to `api.deepgram.com/v1/listen?model=nova-2&smart_format=true`. Smart formatting auto-handles punctuation and number formatting
+4. **Transcription (Fallback — Groq Whisper):** If `DEEPGRAM_API_KEY` is absent or Deepgram returns an error, the worker falls back to `whisper-large-v3` on Groq Cloud
+5. **Hallucination Filtration:** Post-processes output using a lowercase denylist (e.g., *"thank you for watching"*, *"please subscribe"*) and discards results under 4 characters
+6. **Real-Time Sync:** Saves the transcript segment to the DB via internal HTTP endpoint, then publishes to the `transcript_updates` Redis pub/sub channel, which the meeting-service re-broadcasts via Socket.io to all room clients
 
-### 2. AI Analysis Worker (`services/meeting-service/ai_worker.py`)
-Triggered automatically when a meeting ends (monitoring the `meeting_ended_queue` queue) or when a participant manually requests a report (`personal_analysis_queue`).
-* **Structured JSON Prompts:** Builds structured analysis requests and sends them to Groq's `llama-3.3-70b-versatile` LLM model, requesting a strictly validated JSON response.
-* **Mode-Aware Summaries:** Instantly alters its extraction prompts based on the meeting's configured profile:
-  * **Business Mode:** Extracts pain points, product requirements, budget metrics, and competitors.
-  * **Interview Mode:** Rates communication on a scale of 1-10, compiles skill proficiencies, logs candidate red flags, resolves cheating tab-switches from the DB, and outputs a hiring recommendation (`Strong Hire`, `Hire`, `No Hire`).
-  * **General Mode:** Provides default summaries, topics, and key decisions.
-* **Assignee Identification:** Automatically parses action items formatted as `"Task - Owner"` and resolves the owner's name against the meeting's participant UUIDs to assign the action items directly in the database.
-* **Notification Dispatch:** Once the analysis database record is compiled, it queues a task to the Celery broker to send out email notifications to all participants.
+> **Why Deepgram Nova-2 over Whisper?**
+> Deepgram Nova-2 offers significantly lower latency (~300ms vs 1–2s for Groq Whisper), higher accuracy on conversational speech, and native smart formatting. The fallback to Whisper ensures zero-downtime resilience if API keys are unavailable.
 
-### 3. Notification Worker (`services/meeting-service/notification_worker.py`)
-A background Celery worker that manages downstream notification tasks.
-* **SMTP Delivery:** Generates professional email reports using **Jinja2** HTML templates (`meeting_summary.html`, `scheduled_meeting_invite.html`, and `meeting_started_notification.html`).
-* **Gmail OAuth2 Client:** Sends transactional emails securely through the **Google Gmail API** using refreshed credentials and lightweight HTTP POST endpoints.
+### 2. AI Analysis Worker (`ai_worker.py`)
+Triggered by two queues:
+- `meeting_ended_queue` — automatic post-meeting analysis
+- `personal_analysis_queue` — on-demand personal coaching reports
+
+**Mode-Aware Analysis:**
+
+| Mode | What the LLM Extracts |
+|---|---|
+| **General** | Executive summary, sentiment, key topics, action items, decisions |
+| **Business** | All of the above + client pain points, product requirements, objections, budget signals, competitor mentions |
+| **Interview** | Communication rating (1–10), technical skill proficiencies, candidate red flags, tab-switch violations, hiring recommendation (`Strong Hire` / `Hire` / `No Hire`) |
+| **Memo** | Cleans and structures raw voice memo transcripts into a formatted Markdown document matching the selected template (`clean`, `structured`, `cornell`) |
+
+**Action Item Resolution:** Parses `"Task - Owner"` formatted action items and resolves owner names against participant UUIDs to create directly assignable DB records.
+
+**Notification Dispatch:** Queues a Celery task to the notification worker upon report completion.
+
+### 3. Notification Worker (`notification_worker.py`)
+A Celery-based daemon for transactional email delivery.
+- **Gmail OAuth2:** Uses Google Gmail API with refreshed credentials for secure email sending — no SMTP passwords
+- **Jinja2 Templates:** Renders professional HTML emails for meeting summaries (`meeting_summary.html`), scheduled meeting invites (`scheduled_meeting_invite.html`), and meeting-started notifications
 
 ---
 
-## 🗄️ Database Architecture & Schemas
+## 📋 Voice Memo Feature
 
-The database uses PostgreSQL (configured locally or via Neon Serverless Postgres). Migrations are handled independently per-service (Auth and Meeting) using Alembic.
+Voice Memos are a distinct product surface within Cadence — a personal, meeting-free recording mode.
+
+**How It Works:**
+1. User initiates a memo session via `POST /memos/` (creates a `Meeting` record with `mode="memo"`)
+2. The frontend streams audio chunks via Socket.io — same transcription pipeline as live meetings
+3. On memo end, `POST /memos/{memo_id}/end` queues the session to `meeting_ended_queue`
+4. The AI worker detects `mode="memo"` and runs `generate_memo_report()` — uses `memo_prompts` to produce a clean, formatted Markdown document instead of a meeting analysis
+5. The structured document is saved to `meeting_analysis` with `mode="memo"` and served back to the Memo page
+
+**Supported Templates:**
+- **Clean** — Prose-style narrative document with bullet highlights
+- **Structured** — Sections: Key Points, Decisions, Follow-ups, Notes
+- **Cornell** — Cornell note-taking format: Cues | Notes | Summary
+
+**API Endpoints:**
+
+```
+POST   /memos/               - Create a new voice memo session
+GET    /memos/               - List all memos for the current user
+GET    /memos/{memo_id}      - Get memo metadata and analysis
+POST   /memos/{memo_id}/end  - End memo recording & trigger AI formatting
+DELETE /memos/{memo_id}      - Delete a memo
+```
+
+> **Note:** Memos share the `meetings` database table (with `mode="memo"`) for architectural simplicity. On the frontend, memos are surfaced exclusively on the dedicated **Memo page** and are filtered out of the **Meeting History** view.
+
+---
+
+## 🗄️ Database Architecture
+
+PostgreSQL (Neon Serverless or local). Migrations per-service via Alembic.
 
 ```
   ┌──────────────────────┐
   │        users         │
   ├──────────────────────┤
-  │ id (UUID, PK)        ◄────────┐
-  │ email (String, Unique)       │
-  │ name (String)        │        │
-  │ created_at (DateTime)│        │
-  └──────────────────────┘        │
-             ▲                    │
-             │                    │
-             │                    │
-  ┌──────────┴───────────┐        │
-  │  scheduled_meetings  │        │
-  ├──────────────────────┤        │
-  │ id (UUID, PK)        │        │
-  │ join_code (String)   │        │
-  │ creator_id (UUID, FK)│        │
-  │ title (String)       │        │
-  │ mode (String)        │        │
-  │ scheduled_date       │        │
-  │ scheduled_start_time │        │
-  │ expected_duration    │        │
-  │ objectives (String)  │        │
-  │ participants (JSON)  │        │
-  │ created_at           │        │
-  └──────────────────────┘        │
-                                  │
-                                  │
-  ┌──────────────────────┐        │
-  │       meetings       │        │
-  ├──────────────────────┤        │
-  │ id (UUID, PK)        ◄───┐    │
-  │ join_code (String)   │   │    │
-  │ title (String)       │   │    │
-  │ creator_id (UUID)    │   │    │
-  │ status (String)      │   │    │
-  │ mode (String)        │   │    │
-  │ created_at (DateTime)│   │    │
-  │ started_at (DateTime)│   │    │
-  │ ended_at (DateTime)  │   │    │
-  │ duration_seconds     │   │    │
-  └──────────────────────┘   │    │
-             ▲               │    │
-             │               │    │
-   ┌─────────┼─────────┬─────┴────┴──────────┬──────────────────┐
-   │         │         │                     │                  │
-┌──┴──┐   ┌──┴──┐   ┌──┴──┐               ┌──┴──┐            ┌──┴──┐
-│ A   │   │ B   │   │ C   │               │ D   │            │ E   │
-└─────┘   └─────┘   └─────┘               └─────┘            └─────┘
+  │ id (UUID, PK)        ◄────────────────────────┐
+  │ email (Unique)       │                        │
+  │ name                 │                        │
+  │ hashed_password      │                        │
+  │ created_at           │                        │
+  └──────────────────────┘                        │
+             ▲                                    │
+             │                                    │
+  ┌──────────┴───────────┐                        │
+  │  scheduled_meetings  │                        │
+  ├──────────────────────┤                        │
+  │ id, join_code        │                        │
+  │ creator_id (FK)      │                        │
+  │ title, mode          │                        │
+  │ scheduled_date/time  │                        │
+  │ objectives           │                        │
+  │ participants (JSON)  │                        │
+  └──────────────────────┘                        │
+                                                  │
+  ┌──────────────────────────────────────┐        │
+  │             meetings                 │        │
+  ├──────────────────────────────────────┤        │
+  │ id (UUID, PK)                        ◄───┐    │
+  │ join_code                            │   │    │
+  │ title                                │   │    │
+  │ creator_id (UUID)                    │   │    │
+  │ status (waiting/active/ended)        │   │    │
+  │ mode (general/business/interview/    │   │    │
+  │       memo)                          │   │    │
+  │ memo_template (clean/structured/     │   │    │
+  │               cornell)              │   │    │
+  │ created_at, started_at, ended_at    │   │    │
+  │ duration_seconds                    │   │    │
+  └──────────────────────────────────────┘   │    │
+             ▲                               │    │
+             │                               │    │
+   ┌─────────┼──────────┬────────────────────┴────┴────────┐
+   │         │          │                │                  │
+┌──┴──┐   ┌──┴──┐   ┌───┴───┐        ┌───┴───┐         ┌───┴───┐
+│  A  │   │  B  │   │   C   │        │   D   │         │   E   │
+└─────┘   └─────┘   └───────┘        └───────┘         └───────┘
 ```
 
-* **A: `meeting_participants`**: Tracks which users joined the room, their role (`host`, `attendee`), joined/left timestamps, and calculated cumulative speaking times.
-* **B: `transcript_segments`**: Stores chronological meeting statements with start/end audio timestamps, user IDs, and text blocks.
-* **C: `meeting_analysis`**: Stores overall meeting metrics including executive summary, sentiment analysis, mode classification, and custom JSON-formatted insights.
-* **D: `action_items`**: Holds items with a descriptions, completion states, and resolved `assignee_id` foreign keys linking back to `users`.
-* **E: `decisions`**: Stores key agreements and conclusions reached during the meeting session.
-* **F: `meeting_alerts`**: Tracks integrity markers (`tab_switch` alerts) linked to participants.
-* **G: `user_transcript_analysis`**: Persists personal communication coaching, QA performance scoring, confidence ratings, and speech improvement recommendations.
+| Table | Description |
+|---|---|
+| **A: `meeting_participants`** | Tracks user roles (`host`/`attendee`), join/leave timestamps, cumulative speaking time |
+| **B: `transcript_segments`** | Chronological speech segments with `speaker_id`, start/end audio offsets, and text |
+| **C: `meeting_analysis`** | Full AI output: executive summary, sentiment, `insights` JSON (mode-specific), `mode` field |
+| **D: `action_items`** | Tasks with descriptions, completion state, and resolved `assignee_id` FK back to `users` |
+| **E: `decisions`** | Key agreements and conclusions from the meeting |
+| **F: `meeting_alerts`** | Integrity markers (`tab_switch`) linked to participants with timestamps |
+| **G: `user_transcript_analysis`** | Personal coaching: talk time %, communication rating, coaching recommendations, confidence score |
 
 ---
 
-## 🔄 Core Backend Data Flows
+## 🔄 Core Data Flows
 
 ### Real-Time Transcription Pipeline
 ```
-[Client Mic] 
-     │ (AudioWorklet records 16kHz PCM chunks)
-     ▼
-[Meeting Service Socket] (audio_chunk event)
-     │ 
-     ├─► [Redis Broker] (rpush raw audio -> "audio_queue")
-     ▼
-[Transcript Worker] (blpop loop)
-     │ 
-     ├──► [Silero VAD] (Int16 to Float32; rejects noise, accepts speech)
-     │          │
-     │          ▼ (Speech Found)
-     ├──► [Groq Whisper API] (transcribes to text)
-     │          │
-     │          ▼ (Filters hallucinations & saves to DB via HTTP endpoint)
-     └──► [Redis Pub/Sub] (publishes text -> "transcript_updates")
-                │
-                ▼
-[Meeting Service Redis Listener] (handles subscription)
+[Client Mic — AudioWorklet, 16kHz PCM, Float32→Int16]
      │
-     ▼ (sio.emit "transcript_update" to Socket Room)
-[All Clients in Meeting Room]
+     ▼ (Socket.io "audio_chunk" — Base64 encoded binary)
+[Meeting Service] → RPUSH → [Redis "audio_queue"]
+     │
+     ▼ (BLPOP)
+[Transcript Worker]
+     ├──► Buffer accumulation (5–15s per speaker)
+     ├──► Silero VAD (PyTorch) → Drops silence/noise
+     ├──► WAV Header wrapping
+     ├──► Deepgram Nova-2 API (primary) or Groq Whisper (fallback)
+     ├──► Hallucination filter → DB save (internal HTTP)
+     └──► PUBLISH → [Redis "transcript_updates" pub/sub]
+                          │
+                          ▼
+[Meeting Service Redis Listener] → sio.emit("transcript_update") → [All Room Clients]
 ```
 
-### Meeting Conclusion & AI Analysis Pipeline
+### Meeting/Memo End → AI Analysis Pipeline
 ```
-[Host Clicks "End Meeting"] 
+[Host ends meeting / Memo recording stops]
      │
-     ▼ (HTTP POST /meetings/{id}/end or Webhook room_finished)
+     ▼ (POST /meetings/{id}/end or /memos/{id}/end)
 [Meeting Service REST Router]
-     │
-     ├──► Marks status = "ended" & updates duration_seconds
-     │
-     └──► [Redis Broker] (rpush -> "meeting_ended_queue")
-                │
-                ▼
-[AI Analysis Worker] (blpop loop)
-     │
-     ├──► Fetches full meeting transcript & tab-switch alerts from DB
-     ├──► Evaluates target template based on Mode (Business / Interview / General)
-     ├──► Calls [Groq LLaMA-3.3 70B API] (generates structured JSON)
-     ├──► Resolves action item assignees names into participant UUIDs
-     │
-     ▼ (Persists report analysis & action items to DB)
-[Celery Dispatch] (send_task -> "send_meeting_summary_email")
-     │
-     ▼
-[Notification Worker] (Celery consumer)
-     │
-     ├──► Renders Jinja2 HTML email templates
-     └──► Calls [Gmail API Client] (Sends email to participants)
+     ├──► Marks status = "ended", sets duration_seconds
+     └──► RPUSH → [Redis "meeting_ended_queue"]
+                          │
+                          ▼ (BLPOP)
+[AI Analysis Worker]
+     ├──► Reads meeting.mode from DB
+     ├──► Fetches transcript_segments + tab_switch alerts
+     ├──► Selects prompt: meeting_prompts / memo_prompts
+     ├──► Calls Groq LLaMA-3.3-70B → structured JSON response
+     ├──► Resolves action item assignees → UUIDs
+     ├──► Saves: meeting_analysis, action_items, decisions
+     └──► Celery dispatch → "send_meeting_summary_email"
+                          │
+                          ▼
+[Notification Worker]
+     ├──► Renders Jinja2 HTML email template
+     └──► Sends via Gmail OAuth2 API
 ```
 
 ---
 
-## ⚙️ Environment Variables & Config
+## ⚙️ Environment Variables
 
-Create a `.env` configuration file in each service folder (`/services/api-gateway/.env`, `/services/auth-service/.env`, and `/services/meeting-service/.env`) using the following structure:
+Create `.env` files in each service directory (`/services/api-gateway/.env`, `/services/auth-service/.env`, `/services/meeting-service/.env`):
 
 ```env
-# --- General Config ---
+# --- General ---
 PORT=8002
 ALLOWED_ORIGINS=["http://localhost:3000","https://cadence-meeting-intelligence.vercel.app"]
 
-# --- Security & Auth (Shared across gateway, auth, and meeting service) ---
+# --- Security (shared across gateway, auth, meeting) ---
 SECRET_KEY=your-jwt-signing-secret-key-minimum-32-chars
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
 
 # --- Databases ---
-# PostgreSQL URL (use Neon DB or local Postgres)
-DATABASE_URL=postgresql://neondb_owner:password@ep-host-name.pooler.us-east-2.neon.tech/dbname?sslmode=require
-# Redis URL (use Upstash Redis for serverless cloud or local)
+DATABASE_URL=postgresql://user:pass@ep-host.neon.tech/dbname?sslmode=require
 REDIS_URL=redis://localhost:6379/0
 
-# --- Downstream Service Routing (Used by API Gateway) ---
+# --- Service Routing (API Gateway) ---
 AUTH_SERVICE_URL=http://localhost:8001
 MEETING_SERVICE_URL=http://localhost:8002
 
-# --- Third-Party Integrations ---
-# Groq API for Whisper (Speech) and LLaMA 3 (Intelligence)
-GROQ_API=gsk_your_groq_api_credential_key
+# --- Transcription (Primary + Fallback) ---
+DEEPGRAM_API_KEY=your-deepgram-api-key        # Primary: Nova-2 real-time transcription
+GROQ_API=gsk_your_groq_api_key                # Fallback transcription + LLM analysis
 
-# Gmail API OAuth2 (Used by Notification Worker)
+# --- Email Notifications (Gmail OAuth2) ---
 GMAIL_CLIENT_ID=your-google-oauth2-client-id
 GMAIL_CLIENT_SECRET=your-google-oauth2-client-secret
 GMAIL_REFRESH_TOKEN=your-google-oauth2-refresh-token
-FROM_EMAIL=your-gmail-address@gmail.com
+FROM_EMAIL=your-gmail@gmail.com
 
-# LiveKit WebRTC Configuration (Used for Webhook WebRTC rooms verification)
+# --- LiveKit WebRTC ---
 LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=your-livekit-api-key
 LIVEKIT_API_SECRET=your-livekit-api-secret
 ```
 
 ---
+
+## 🗺️ Upcoming Features (Roadmap)
+
+The platform is actively expanding from a meeting-centric tool to a full **Speech Intelligence Layer** applicable to any spoken context.
+
+### Near-Term
+
+| Feature | Description |
+|---|---|
+| **Screen Sharing** | LiveKit's `setScreenShareEnabled()` — already architected, needs frontend toggle |
+| **Multilingual Transcription** | Deepgram and Whisper both support non-English — Hindi, Spanish, French support planned |
+| **Action Item Workspace** | Per-action-item comment threads + status tracking. Export to Jira / Linear / Notion |
+| **Scheduled Meeting Invites** | Calendar-based meeting creation with email invites sent to participants |
+
+### Medium-Term
+
+| Feature | Description |
+|---|---|
+| **Speaker Diarization** | Replace socket-based speaker tracking with `pyannote.audio` for ML-based "who said what" voice fingerprinting |
+| **Semantic Meeting Search** | Store transcript embeddings in `pgvector`. Query: *"What did we decide about the API schema last sprint?"* — full RAG over your own meeting history |
+| **Real-Time AI Coaching** | Mid-meeting LLM sidebar whispers: *"You've been talking for 8 minutes — consider pausing for input"* or *"This topic has been unresolved for 20 minutes"* |
+| **Meeting Coach (Personal AI)** | Cross-meeting personal pattern analysis: talk time trends, interruption count, monologue length, question frequency |
+| **Auto Follow-up Email Draft** | One-click LLM drafts a professional follow-up email with decisions and action items pre-filled for all participants |
+
+### Long-Term (V2 Scope)
+
+| Feature | Description |
+|---|---|
+| **External Platform Integration** | Webhook-based Zoom/Google Meet recording ingestion → same Deepgram + LLM pipeline |
+| **Slack / Notion Export** | Post-meeting report pushed to Slack channel or Notion page automatically |
+| **Stripe Billing** | Free tier: 5 meetings/month. Pro: unlimited meetings, longer retention, priority transcription |
+| **Chrome Extension** | Capture audio from any browser tab (Google Meet, Zoom web, Teams) without a room join |
+| **Mobile App** | React Native app for quick voice memos and meeting joins on the go |
+
+---
+
+## 🧠 Intelligence Stack Summary
+
+| Layer | Technology | Role |
+|---|---|---|
+| **Speech → Text (Primary)** | Deepgram Nova-2 | Real-time conversational transcription with smart formatting |
+| **Speech → Text (Fallback)** | Groq Whisper Large-v3 | Cloud-hosted Whisper for resilience |
+| **Voice Activity Detection** | Silero VAD (PyTorch) | Local neural noise/silence rejection before any API call |
+| **Language Model** | LLaMA-3.3-70B via Groq | Mode-aware meeting analysis and memo formatting |
+| **Real-Time Transport** | LiveKit (WebRTC SFU) | Browser-based audio/video rooms |
+| **Message Broker** | Redis (Lists + Pub/Sub) | Audio queue + live transcript broadcast |
+| **Task Queue** | Celery | Async email notifications |
+| **Database** | PostgreSQL (Neon) | All persistent state |
+| **Email Delivery** | Gmail OAuth2 API | Transactional HTML emails |
+
+---
+
+## 🔧 Local Development
+
+```bash
+# 1. Start infrastructure
+docker-compose up redis
+
+# 2. Start Auth Service
+cd services/auth-service && uvicorn main:app --port 8001 --reload
+
+# 3. Start Meeting Service (auto-spawns transcript + AI + notification workers)
+cd services/meeting-service && uvicorn main:app --port 8002 --reload
+
+# 4. Start API Gateway
+cd services/api-gateway && uvicorn main:app --port 8000 --reload
+
+# 5. Run database migrations (first time)
+cd services/meeting-service && alembic upgrade head
+cd services/auth-service && alembic upgrade head
+```
+
+> **Note:** The Meeting Service lifespan manager automatically spawns `transcript_worker.py`, `ai_worker.py`, and the Celery notification worker as subprocesses on startup. No separate terminals needed for workers in local dev.
+
+---
+
+## 📁 Project Structure
+
+```
+cadence-backend/
+├── docker-compose.yml
+├── README.md
+│
+└── services/
+    ├── api-gateway/
+    │   ├── main.py                  ← FastAPI + AuthMiddleware + CORS
+    │   ├── middleware/auth.py        ← JWT verification + X-User-ID injection
+    │   └── routers/proxy.py         ← HTTP proxy routes (auth, meetings, memos)
+    │
+    ├── auth-service/
+    │   ├── main.py
+    │   ├── models.py                ← User, RefreshToken
+    │   └── routes/auth.py           ← register, login, refresh, logout, /me
+    │
+    └── meeting-service/
+        ├── main.py                  ← FastAPI + Socket.io ASGI mount + lifespan worker spawner
+        ├── models.py                ← Meeting (mode, memo_template), Participant, Transcript, Analysis...
+        ├── schemas.py               ← Pydantic models including MemoCreate/MemoOut
+        ├── socket_handlers.py       ← All Socket.io event handlers
+        ├── transcript_worker.py     ← Deepgram Nova-2 / Whisper + Silero VAD pipeline
+        ├── ai_worker.py             ← LLaMA-3.3-70B mode-aware analysis + memo formatting
+        ├── notification_worker.py   ← Celery + Gmail OAuth2 email delivery
+        ├── routes/
+        │   ├── meeting.py           ← Meeting CRUD + end/leave/analysis endpoints
+        │   └── memos.py             ← Voice memo create/list/get/end/delete endpoints
+        ├── prompts/
+        │   ├── meeting_prompts.py   ← General, Business, Interview prompt templates
+        │   ├── memo_prompts.py      ← Clean, Structured, Cornell document templates
+        │   └── personal_prompts.py  ← Per-participant coaching prompt
+        └── alembic/                 ← DB migration versions
+```
+
+---
+
+## 💡 What This Demonstrates (Engineering Perspective)
+
+| Skill | Where It Appears |
+|---|---|
+| **FastAPI microservices** | All 3 services with proper lifespan, middleware, and dependency injection |
+| **WebSockets / Socket.io** | Real-time room signaling, audio streaming, transcript broadcast |
+| **WebRTC + LiveKit SFU** | Browser-native audio/video with SFU-managed rooms |
+| **Real-time audio processing** | AudioWorklet → PCM → VAD → cloud STT pipeline |
+| **Multi-provider STT** | Deepgram Nova-2 primary + Groq Whisper fallback with graceful degradation |
+| **Async task queues** | Redis-backed BLPOP workers + Celery notification daemon |
+| **LLM integration & prompt engineering** | Mode-specific structured JSON extraction, memo document formatting |
+| **PostgreSQL + SQLAlchemy** | Relational schema across 7+ tables with Alembic migrations |
+| **Redis Pub/Sub** | Real-time transcript broadcast across service boundaries |
+| **JWT authentication** | HttpOnly refresh cookies, short-lived access tokens, automatic rotation |
+| **Gmail OAuth2 API** | Transactional email without SMTP credentials |
+| **Docker + multi-service orchestration** | Docker Compose for full local stack |
+| **Subprocess lifecycle management** | Meeting service spawns and manages worker processes via Python `subprocess` |
